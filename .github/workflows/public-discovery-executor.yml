@@ -1,0 +1,73 @@
+name: Public discovery executor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  guard-and-execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Refuse non-default or unprotected refs
+        if: >-
+          github.ref_protected != true ||
+          github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Public discovery is available only from the protected default branch." >&2
+          exit 1
+
+      - name: Checkout the protected default-branch candidate
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Materialize the fixed offline parser image before claiming work
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='python@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0'
+          docker pull "$image"
+          docker image inspect "$image" >/dev/null
+
+      - name: Verify the deterministic offline artifact
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          temporary="$(mktemp -d)"
+          trap 'rm -rf -- "$temporary"' EXIT
+          python3 -m adapters.obsidian.build_public_executor --output "$temporary/first.pyz" >"$temporary/first.receipt"
+          python3 -m adapters.obsidian.build_public_executor --output "$temporary/second.pyz" >"$temporary/second.receipt"
+          cmp "$temporary/first.pyz" "$temporary/second.pyz"
+          cmp "$temporary/first.receipt" "$temporary/second.receipt"
+          install -m 0400 "$temporary/first.pyz" "${RUNNER_TEMP}/public-discovery-executor.pyz"
+
+      - name: Execute one protected public-discovery claim
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          TRANS_HUB_PUBLIC_DISCOVERY_API_BASE: ${{ vars.TRANSHUB_PUBLIC_DISCOVERY_API_BASE }}
+          TRANS_HUB_PUBLIC_DISCOVERY_OIDC_AUDIENCE: ${{ vars.TRANSHUB_PUBLIC_DISCOVERY_OIDC_AUDIENCE }}
+          TRANS_HUB_PUBLIC_DISCOVERY_EXECUTOR_ARTIFACT: ${{ runner.temp }}/public-discovery-executor.pyz
+        run: |
+          set -euo pipefail
+          umask 077
+          PYTHONDONTWRITEBYTECODE=1 python3 -m adapters.obsidian.public_discovery_executor
