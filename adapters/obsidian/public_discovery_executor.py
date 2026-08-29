@@ -316,19 +316,9 @@ class HttpControlPlane:
         payload = {
             "leaseFence": claim.lease_fence,
             "grantCommandId": command_id,
-            "projectionGeneration": plan.projection_generation,
-            "authorityBindingDigest": plan.authority_binding_digest,
-            "sourcePlanDigest": plan.source_plan_digest,
-            "adapterBuildDigest": plan.adapter_build_digest,
-            "adapterProfileDigest": plan.adapter_profile_digest,
-            "resultSchema": plan.result_schema,
-            "resultMediaType": plan.result_media_type,
-            "resultMaxBytes": plan.result_max_bytes,
-            "materializationTargetDigest": plan.materialization_target_digest,
             "expectedTransportDigest": sha256(result).hexdigest(),
             "expectedSizeBytes": len(result),
         }
-        payload["requestDigest"] = sha256(_canonical_json(payload)).hexdigest()
         _, body = self._request(
             "POST",
             f"/v1/public-discovery-executor/tasks/{claim.task_id}/result-upload-grants",

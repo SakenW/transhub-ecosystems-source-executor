@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +11,7 @@ from adapters.obsidian.public_discovery_executor import (
     Claim,
     ExecutorConfig,
     ExecutorError,
+    HttpControlPlane,
     SourcePlan,
     UploadGrant,
     execute_one,
@@ -179,6 +181,49 @@ class ExecutorStateTests(unittest.TestCase):
         self.assertEqual(uploader.calls, 0)
         self.assertEqual(control.grant_commands, [])
         self.assertEqual(control.failures, ["adapter_validation_rejected"])
+
+    def test_grant_sends_only_result_byte_facts(self) -> None:
+        client = HttpControlPlane("https://api.example.test")
+        captured: dict[str, object] = {}
+
+        def request(
+            method: str, path: str, token: str, payload: dict[str, object] | None = None
+        ) -> tuple[int, bytes]:
+            captured.update(
+                {"method": method, "path": path, "token": token, "payload": payload}
+            )
+            return (
+                200,
+                json.dumps(
+                    {
+                        "grantReceiptId": "22222222-2222-4222-8222-222222222222",
+                        "resultObjectId": "33333333-3333-4333-8333-333333333333",
+                        "grantExpiresAt": "2026-01-01T00:00:00Z",
+                        "provider": "qiniu_kodo",
+                        "bucket": "result-bucket",
+                        "objectKey": "public-discovery/results/" + "12" * 32 + ".canonical-json",
+                        "token": "short-lived",
+                        "uploadOrigins": ["https://upload.example.test"],
+                        "contentType": "application/vnd.trans-hub.public-discovery-result+json",
+                        "expectedSizeBytes": 2,
+                        "grantState": "upload_grant",
+                        "replayed": False,
+                    }
+                ).encode(),
+            )
+
+        client._request = request  # type: ignore[method-assign]
+        client.grant("oidc", _claim(), _plan(), b"{}", "44444444-4444-4444-8444-444444444444")
+
+        self.assertEqual(
+            captured["payload"],
+            {
+                "leaseFence": 7,
+                "grantCommandId": "44444444-4444-4444-8444-444444444444",
+                "expectedTransportDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "expectedSizeBytes": 2,
+            },
+        )
 
 
 if __name__ == "__main__":
