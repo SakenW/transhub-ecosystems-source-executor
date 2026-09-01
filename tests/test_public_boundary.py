@@ -8,65 +8,68 @@ import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
-from io import BytesIO
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from adapters.obsidian.build_public_executor import build
-from adapters.obsidian.offline_executor_host import (
-    OfflineExecutorHost,
-    OfflineExecutorHostError,
-    OfflineExecutorTask,
-)
-from adapters.obsidian.public_zip_closure import (
-    PublicZipClosureError,
-    components_from_zip,
-)
-from adapters.obsidian.zip_bridge import (
+from adapters.obsidian.component_bridge import (
+    ObsidianComponentBridgeError,
     PUBLIC_EXECUTOR_PROTOCOL,
     _canonical_json,
     handle_public_request,
 )
+from adapters.obsidian.offline_executor_host import (
+    OfflineExecutorComponent,
+    OfflineExecutorHost,
+    OfflineExecutorHostError,
+    OfflineExecutorTask,
+)
 
 ROOT = Path(__file__).parents[1]
 TARGET_DIGEST = "91" * 32
+MANIFEST = json.dumps(
+    {
+        "id": "example-plugin",
+        "name": "Example Plugin",
+        "version": "1.0.0",
+        "description": "Explore your notes.",
+    }
+).encode()
+MAIN = b'new Notice("Adapter ready");'
 
 
-def _plugin_zip() -> bytes:
-    output = BytesIO()
-    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "plugin/manifest.json",
-            json.dumps(
-                {
-                    "id": "example-plugin",
-                    "name": "Example Plugin",
-                    "version": "1.0.0",
-                    "description": "Explore your notes.",
-                }
-            ),
-        )
-        archive.writestr("plugin/main.js", 'new Notice("Adapter ready");')
-    return output.getvalue()
+def _components() -> tuple[OfflineExecutorComponent, ...]:
+    return (
+        OfflineExecutorComponent("manifest", "manifest.json", MANIFEST),
+        OfflineExecutorComponent("main", "main.js", MAIN),
+    )
 
 
-def _request(raw: bytes) -> bytes:
+def _request(components: tuple[OfflineExecutorComponent, ...]) -> bytes:
     return json.dumps(
         {
+            "components": [
+                {
+                    "content_base64": base64.b64encode(component.content).decode("ascii"),
+                    "name": component.name,
+                    "role": component.role,
+                }
+                for component in components
+            ],
             "materialization_target_digest": TARGET_DIGEST,
             "policy_revision": 7,
             "protocol": PUBLIC_EXECUTOR_PROTOCOL,
-            "zip_base64": base64.b64encode(raw).decode("ascii"),
         }
     ).encode()
 
 
-def _task(raw: bytes, receipt: dict[str, object]) -> OfflineExecutorTask:
+def _task(receipt: dict[str, object]) -> OfflineExecutorTask:
     return OfflineExecutorTask(
         adapter_artifact_digest=str(receipt["artifactDigest"]),
         adapter_profile_digest=str(receipt["profileDigest"]),
-        expected_raw_digest=sha256(raw).hexdigest(),
-        expected_raw_size=len(raw),
+        expected_manifest_digest=sha256(MANIFEST).hexdigest(),
+        expected_manifest_size=len(MANIFEST),
+        expected_main_digest=sha256(MAIN).hexdigest(),
+        expected_main_size=len(MAIN),
         materialization_target_digest=TARGET_DIGEST,
         policy_revision=7,
         result_max_bytes=8 * 1024 * 1024,
@@ -74,20 +77,34 @@ def _task(raw: bytes, receipt: dict[str, object]) -> OfflineExecutorTask:
 
 
 class PublicBoundaryTests(unittest.TestCase):
-    def test_pyz_build_is_repeatable_and_executes_without_raw_output(self) -> None:
-        with self.subTest("build twice"):
-            temporary = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
-            first = temporary / "first.pyz"
-            second = temporary / "second.pyz"
-            first_receipt = build(first)
-            second_receipt = build(second)
-            self.assertEqual(first.read_bytes(), second.read_bytes())
-            self.assertEqual(first_receipt, second_receipt)
+    def test_release_source_path_contains_no_zip_compatibility_plane(self) -> None:
+        adapter_root = ROOT / "adapters" / "obsidian"
+        self.assertFalse((adapter_root / "zip_bridge.py").exists())
+        self.assertFalse((adapter_root / "public_zip_closure.py").exists())
+        profile = json.loads(
+            (adapter_root / "public-executor-profile.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            profile["entryModule"], "adapters.obsidian.component_bridge"
+        )
+        self.assertNotIn(
+            "zip_base64",
+            (adapter_root / "public_discovery_executor.py").read_text(encoding="utf-8"),
+        )
 
-        raw = _plugin_zip()
+    def test_pyz_build_is_repeatable_and_executes_without_component_output(self) -> None:
+        temporary = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        first = temporary / "first.pyz"
+        second = temporary / "second.pyz"
+        first_receipt = build(first)
+        second_receipt = build(second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(first_receipt, second_receipt)
+
+        components = _components()
         completed = subprocess.run(
             [sys.executable, "-I", str(first)],
-            input=_request(raw),
+            input=_request(components),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -103,72 +120,89 @@ class PublicBoundaryTests(unittest.TestCase):
                 "revision": 1,
             },
         )
-        self.assertNotIn(raw, first.read_bytes())
-        self.assertNotIn(base64.b64encode(raw), completed.stdout)
+        self.assertNotIn(MAIN, first.read_bytes())
+        self.assertNotIn(base64.b64encode(MAIN), completed.stdout)
 
-    def test_zip_closure_rejects_traversal_and_excessive_compression(self) -> None:
-        traversal = BytesIO()
-        with ZipFile(traversal, "w", compression=ZIP_DEFLATED) as archive:
-            archive.writestr("../manifest.json", b"{}")
-            archive.writestr("../main.js", b"const value = 1;")
-        with self.assertRaisesRegex(PublicZipClosureError, "zip_entry_invalid"):
-            components_from_zip(traversal.getvalue())
+    def test_component_closure_rejects_missing_duplicate_and_legacy_zip_request(self) -> None:
+        manifest_only = _request((_components()[0],))
+        with self.assertRaisesRegex(
+            ObsidianComponentBridgeError, "component_closure_invalid"
+        ):
+            handle_public_request(manifest_only)
 
-        bomb = BytesIO()
-        with ZipFile(bomb, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
-            archive.writestr("plugin/manifest.json", b"{}")
-            archive.writestr("plugin/main.js", b"A" * (1024 * 1024))
-        with self.assertRaisesRegex(PublicZipClosureError, "zip_entry_invalid"):
-            components_from_zip(bomb.getvalue())
+        duplicate = _request((_components()[0], _components()[0]))
+        with self.assertRaisesRegex(
+            ObsidianComponentBridgeError, "component_closure_invalid"
+        ):
+            handle_public_request(duplicate)
 
-    def test_host_cleanup_and_concurrency_use_distinct_ephemeral_paths(self) -> None:
+        legacy = json.dumps(
+            {
+                "materialization_target_digest": TARGET_DIGEST,
+                "policy_revision": 7,
+                "protocol": "trans-hub.obsidian-public-executor.v1",
+                "zip_base64": base64.b64encode(b"legacy zip").decode("ascii"),
+            }
+        ).encode()
+        with self.assertRaisesRegex(
+            ObsidianComponentBridgeError, "request_invalid"
+        ):
+            handle_public_request(legacy)
+
+    def test_host_never_persists_components_and_concurrency_is_isolated(self) -> None:
         temporary = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
         artifact = temporary / "executor.pyz"
         receipt = build(artifact)
-        raw = _plugin_zip()
-        observed_paths: list[Path] = []
+        components = _components()
+        observed_roots: list[Path] = []
         observed_names: list[str] = []
 
         def runner(
             command: tuple[str, ...],
-            raw_path: Path,
+            received: tuple[OfflineExecutorComponent, ...],
             output: object,
             _task_value: OfflineExecutorTask,
         ) -> None:
-            observed_paths.append(raw_path)
+            mount = command[command.index("--mount") + 1]
+            source = Path(mount.split("source=", 1)[1].split(",", 1)[0])
+            observed_roots.append(source.parent)
             observed_names.append(command[command.index("--name") + 1])
-            output.write(handle_public_request(_request(raw_path.read_bytes())))  # type: ignore[attr-defined]
+            self.assertEqual(received, components)
+            self.assertFalse((source.parent / "source.raw").exists())
+            output.write(handle_public_request(_request(received)))  # type: ignore[attr-defined]
 
         host = OfflineExecutorHost(executor_artifact=artifact, runner=runner)
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(
                 pool.map(
-                    lambda _index: host.prepare_result([raw], _task(raw, receipt)),
+                    lambda _index: host.prepare_result(components, _task(receipt)),
                     range(2),
                 )
             )
         self.assertEqual(results[0], results[1])
-        self.assertEqual(len(set(observed_paths)), 2)
+        self.assertEqual(len(set(observed_roots)), 2)
         self.assertEqual(len(set(observed_names)), 2)
-        self.assertTrue(all(not path.exists() for path in observed_paths))
+        self.assertTrue(all(not root.exists() for root in observed_roots))
 
-        failed_paths: list[Path] = []
+        failed_roots: list[Path] = []
 
         def fail_runner(
-            _command: tuple[str, ...],
-            raw_path: Path,
+            command: tuple[str, ...],
+            _received: tuple[OfflineExecutorComponent, ...],
             _output: object,
             _task_value: OfflineExecutorTask,
         ) -> None:
-            failed_paths.append(raw_path)
+            mount = command[command.index("--mount") + 1]
+            source = Path(mount.split("source=", 1)[1].split(",", 1)[0])
+            failed_roots.append(source.parent)
             raise OfflineExecutorHostError("offline_executor_timeout")
 
         with self.assertRaisesRegex(OfflineExecutorHostError, "timeout"):
             OfflineExecutorHost(
                 executor_artifact=artifact, runner=fail_runner
-            ).prepare_result([raw], _task(raw, receipt))
-        self.assertTrue(failed_paths)
-        self.assertTrue(all(not path.exists() for path in failed_paths))
+            ).prepare_result(components, _task(receipt))
+        self.assertTrue(failed_roots)
+        self.assertTrue(all(not root.exists() for root in failed_roots))
 
     def test_executor_modules_import_only_standard_library_and_local_package(self) -> None:
         for path in sorted((ROOT / "adapters" / "obsidian").glob("*.py")):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -23,14 +24,17 @@ def _claim() -> Claim:
 
 
 def _plan() -> SourcePlan:
+    manifest = b"manifest"
+    main = b"main"
     return SourcePlan(
         1,
         "official-owner",
         2,
         "official-plugin",
         3,
-        Asset(4, "plugin.zip", 3, "bb" * 32),
-        5,
+        Asset(4, "manifest.json", len(manifest), sha256(manifest).hexdigest()),
+        Asset(5, "main.js", len(main), sha256(main).hexdigest()),
+        6,
         "cc" * 32,
         "dd" * 32,
         "aa" * 32,
@@ -64,16 +68,22 @@ class _Tokens:
 
 
 class _Source:
-    def chunks(self, _plan_value: SourcePlan) -> tuple[bytes, ...]:
-        return (b"raw",)
+    def __init__(self) -> None:
+        self.asset_names: list[str] = []
+
+    def chunks(
+        self, _plan_value: SourcePlan, asset: Asset
+    ) -> tuple[bytes, ...]:
+        self.asset_names.append(asset.name)
+        return (b"manifest",) if asset.name == "manifest.json" else (b"main",)
 
 
 class _Host:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
 
-    def prepare_result(self, chunks: object, _task: object) -> bytes:
-        self.assert_chunks = b"".join(chunks)  # type: ignore[arg-type]
+    def prepare_result(self, components: object, _task: object) -> bytes:
+        self.assert_components = components
         if self.error:
             raise self.error
         return b"{}"
@@ -147,15 +157,17 @@ class ExecutorStateTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             control = _Control()
             uploader = _Uploader()
+            source = _Source()
             outcome = execute_one(
                 config=self._config(Path(temporary)),
                 tokens=_Tokens(),
                 control=control,
-                source=_Source(),
+                source=source,
                 uploader=uploader,
                 host_factory=lambda _artifact: _Host(),  # type: ignore[arg-type,return-value]
             )
         self.assertEqual(outcome, "executor_result_handed_off")
+        self.assertEqual(source.asset_names, ["manifest.json", "main.js"])
         self.assertEqual(len(control.grant_commands), 2)
         self.assertEqual(len(set(control.grant_commands)), 1)
         self.assertEqual(uploader.calls, 2)
@@ -224,6 +236,72 @@ class ExecutorStateTests(unittest.TestCase):
                 "expectedSizeBytes": 2,
             },
         )
+
+    def test_source_plan_requires_manifest_and_main_release_assets(self) -> None:
+        client = HttpControlPlane("https://api.example.test")
+        payload = {
+            "provider": "github_release",
+            "ownerId": 1,
+            "ownerLogin": "official-owner",
+            "repositoryId": 2,
+            "repositoryName": "official-plugin",
+            "releaseId": 3,
+            "commitSha": "ab" * 20,
+            "tag": "1.0.0",
+            "assets": [
+                {
+                    "assetId": 4,
+                    "name": "manifest.json",
+                    "size": 8,
+                    "sha256": sha256(b"manifest").hexdigest(),
+                },
+                {
+                    "assetId": 5,
+                    "name": "main.js",
+                    "size": 4,
+                    "sha256": sha256(b"main").hexdigest(),
+                },
+            ],
+            "primaryAssetId": 5,
+            "projectionGeneration": 6,
+            "authorityBindingDigest": "cc" * 32,
+            "sourcePlanDigest": "dd" * 32,
+            "adapterBuildDigest": "aa" * 32,
+            "adapterProfileDigest": "ee" * 32,
+            "resultSchema": "canonical-json-v1",
+            "resultMediaType": "application/vnd.trans-hub.public-discovery-result+json",
+            "resultMaxBytes": 1024,
+            "materializationTargetDigest": "ff" * 32,
+        }
+        client._request = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
+            200,
+            json.dumps(payload).encode(),
+        )
+        plan = client.source_plan("oidc", _claim())
+        self.assertEqual(plan.manifest_asset.name, "manifest.json")
+        self.assertEqual(plan.main_asset.name, "main.js")
+
+        component_assets = list(payload["assets"])  # type: ignore[arg-type]
+        payload["assets"] = component_assets + [
+            {
+                "assetId": 7,
+                "name": "legacy.zip",
+                "size": 3,
+                "sha256": "bb" * 32,
+            }
+        ]
+        payload["primaryAssetId"] = 7
+        with self.assertRaisesRegex(
+            ExecutorError, "source_component_closure_incomplete"
+        ):
+            client.source_plan("oidc", _claim())
+
+        payload["assets"] = [component_assets[0]]
+        payload["primaryAssetId"] = 4
+        with self.assertRaisesRegex(
+            ExecutorError, "source_component_closure_incomplete"
+        ):
+            client.source_plan("oidc", _claim())
 
 
 if __name__ == "__main__":

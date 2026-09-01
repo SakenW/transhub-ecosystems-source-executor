@@ -1,9 +1,9 @@
 {
   "schema": "trans-hub.public-executor-profile.v1",
   "executorKey": "obsidian-public-discovery",
-  "entryModule": "adapters.obsidian.zip_bridge",
+  "entryModule": "adapters.obsidian.component_bridge",
   "entryPoint": "public_main",
-  "bridgeProtocol": "trans-hub.obsidian-public-executor.v1",
+  "bridgeProtocol": "trans-hub.obsidian-public-executor.v2",
   "python": {
     "implementation": "cpython",
     "major": 3,
@@ -17,14 +17,13 @@
       "adapters/__init__.py",
       "adapters/obsidian/__init__.py",
       "adapters/obsidian/adapter_worker.py",
-      "adapters/obsidian/public_zip_closure.py",
-      "adapters/obsidian/zip_bridge.py"
+      "adapters/obsidian/component_bridge.py"
     ]
   },
   "network": {
     "untrustedInputExecuted": false,
     "allowedImports": "python-stdlib-only",
-    "rawInputPersistence": "forbidden"
+    "componentInputPersistence": "forbidden"
   },
   "container": {
     "image": "python@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0",

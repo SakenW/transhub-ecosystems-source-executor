@@ -1,9 +1,9 @@
 """Content-locked host for the fail-closed public Obsidian executor candidate.
 
-The host owns temporary raw bytes and the Docker boundary.  It deliberately
+The host accepts two already bounded release components in memory and owns the
+offline Docker boundary.  It never persists component bytes and deliberately
 does not implement task claiming, source download, OIDC, result grants, Kodo,
-or any other network operation.  Callers may supply received byte chunks and,
-after cleanup, a narrow structured-result upload callback.
+or any other network operation.
 """
 
 from __future__ import annotations
@@ -15,15 +15,17 @@ import re
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import IO, BinaryIO, Final, Literal, TypeVar
+from typing import BinaryIO, Final, Literal, TypeVar
 from uuid import uuid4
 
 from .build_public_executor import PROFILE_PATH, canonical_json
-from .zip_bridge import (
+from .component_bridge import (
+    MAX_MAIN_BYTES,
+    MAX_MANIFEST_BYTES,
     PUBLIC_EXECUTOR_PROTOCOL,
     PUBLIC_RESULT_PROTOCOL,
     PUBLIC_RESULT_REVISION,
@@ -35,12 +37,11 @@ from .zip_bridge import (
 FIXED_PYTHON_IMAGE: Final = (
     "python@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0"
 )
-MAX_RAW_BYTES: Final = 64 * 1024 * 1024
 MAX_RESULT_BYTES: Final = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _CONTAINER_EXECUTOR_PATH: Final = "/opt/trans-hub/public-executor.pyz"
-_Phase = Literal["raw_staged", "adapter_completed", "raw_deleted", "before_upload"]
+_Phase = Literal["components_validated", "adapter_completed", "before_upload"]
 _T = TypeVar("_T")
 
 
@@ -49,13 +50,24 @@ class OfflineExecutorHostError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class OfflineExecutorComponent:
+    """One exact inert GitHub Release asset selected by the source plan."""
+
+    role: Literal["manifest", "main"]
+    name: Literal["manifest.json", "main.js"]
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class OfflineExecutorTask:
     """Exact immutable inputs received from a future trusted control plane."""
 
     adapter_artifact_digest: str
     adapter_profile_digest: str
-    expected_raw_digest: str
-    expected_raw_size: int
+    expected_manifest_digest: str
+    expected_manifest_size: int
+    expected_main_digest: str
+    expected_main_size: int
     materialization_target_digest: str
     policy_revision: int
     result_max_bytes: int
@@ -67,12 +79,15 @@ class OfflineExecutorTask:
                 for value in (
                     self.adapter_artifact_digest,
                     self.adapter_profile_digest,
-                    self.expected_raw_digest,
+                    self.expected_manifest_digest,
+                    self.expected_main_digest,
                     self.materialization_target_digest,
                 )
             )
-            or self.expected_raw_size < 1
-            or self.expected_raw_size > MAX_RAW_BYTES
+            or self.expected_manifest_size < 1
+            or self.expected_manifest_size > MAX_MANIFEST_BYTES
+            or self.expected_main_size < 1
+            or self.expected_main_size > MAX_MAIN_BYTES
             or self.result_max_bytes < 1
             or self.result_max_bytes > MAX_RESULT_BYTES
             or isinstance(self.policy_revision, bool)
@@ -82,13 +97,21 @@ class OfflineExecutorTask:
             raise OfflineExecutorHostError("offline_executor_task_invalid")
 
 
-Runner = Callable[[tuple[str, ...], Path, BinaryIO, OfflineExecutorTask], None]
+Runner = Callable[
+    [
+        tuple[str, ...],
+        tuple[OfflineExecutorComponent, ...],
+        BinaryIO,
+        OfflineExecutorTask,
+    ],
+    None,
+]
 PhaseHook = Callable[[_Phase, Path | None], None]
 Uploader = Callable[[bytes], _T]
 
 
 class OfflineExecutorHost:
-    """Receive one exact raw object, parse offline, delete it, then hand off."""
+    """Parse one exact in-memory component closure and hand off structured JSON."""
 
     def __init__(
         self,
@@ -102,57 +125,54 @@ class OfflineExecutorHost:
         self._phase_hook = phase_hook or (lambda _phase, _path: None)
 
     def prepare_result(
-        self, raw_chunks: Iterable[bytes], task: OfflineExecutorTask
+        self,
+        components: tuple[OfflineExecutorComponent, ...],
+        task: OfflineExecutorTask,
     ) -> bytes:
-        """Return a verified structured result only after raw bytes are gone."""
+        """Return a verified structured result without persisting source bytes."""
 
         _disable_core_dumps()
+        _validate_components(components, task)
+        self._phase_hook("components_validated", None)
         with tempfile.TemporaryDirectory(
             prefix="trans-hub-public-discovery-"
         ) as temporary:
             temporary_root = Path(temporary)
             temporary_root.chmod(0o700)
             staged_executor = temporary_root / "public-executor.pyz"
-            raw_path = temporary_root / "source.raw"
             _stage_executor(
                 self._executor_artifact,
                 staged_executor,
                 expected_artifact_digest=task.adapter_artifact_digest,
                 expected_profile_digest=task.adapter_profile_digest,
             )
-            try:
-                _stage_raw(raw_chunks, raw_path, task)
-                self._phase_hook("raw_staged", raw_path)
-                with tempfile.TemporaryFile(mode="w+b") as output:
-                    container_name = "trans-hub-public-discovery-" + uuid4().hex
-                    command = docker_run_command(
-                        staged_executor=staged_executor,
-                        container_name=container_name,
+            with tempfile.TemporaryFile(mode="w+b") as output:
+                container_name = "trans-hub-public-discovery-" + uuid4().hex
+                command = docker_run_command(
+                    staged_executor=staged_executor,
+                    container_name=container_name,
+                )
+                self._runner(command, components, output, task)
+                self._phase_hook("adapter_completed", None)
+                output_size = output.tell()
+                if output_size < 1 or output_size > task.result_max_bytes:
+                    raise OfflineExecutorHostError(
+                        "offline_executor_result_size_invalid"
                     )
-                    self._runner(command, raw_path, output, task)
-                    self._phase_hook("adapter_completed", raw_path)
-                    output_size = output.tell()
-                    if output_size < 1 or output_size > task.result_max_bytes:
-                        raise OfflineExecutorHostError(
-                            "offline_executor_result_size_invalid"
-                        )
-                    output.seek(0)
-                    result = output.read()
-            finally:
-                raw_path.unlink(missing_ok=True)
-            self._phase_hook("raw_deleted", None)
+                output.seek(0)
+                result = output.read()
             _validate_result(result, task)
         return result
 
     def prepare_and_upload(
         self,
-        raw_chunks: Iterable[bytes],
+        components: tuple[OfflineExecutorComponent, ...],
         task: OfflineExecutorTask,
         uploader: Uploader[_T],
     ) -> _T:
-        """Invoke the caller's structured-only upload stage after cleanup."""
+        """Invoke the caller's structured-only upload after parser validation."""
 
-        result = self.prepare_result(raw_chunks, task)
+        result = self.prepare_result(components, task)
         self._phase_hook("before_upload", None)
         return uploader(result)
 
@@ -160,7 +180,7 @@ class OfflineExecutorHost:
 def docker_run_command(
     *, staged_executor: Path, container_name: str
 ) -> tuple[str, ...]:
-    """Build the immutable Docker argv; raw bytes never appear in it."""
+    """Build the immutable Docker argv; component bytes never appear in it."""
 
     if (
         not staged_executor.is_absolute()
@@ -256,33 +276,45 @@ def _disable_core_dumps() -> None:
         raise OfflineExecutorHostError("offline_executor_core_dump_disable_failed") from exc
 
 
-def _stage_raw(
-    raw_chunks: Iterable[bytes], raw_path: Path, task: OfflineExecutorTask
+def _validate_components(
+    components: tuple[OfflineExecutorComponent, ...], task: OfflineExecutorTask
 ) -> None:
-    digest = sha256()
-    total = 0
-    try:
-        with raw_path.open("xb") as output:
-            raw_path.chmod(0o600)
-            for chunk in raw_chunks:
-                if not isinstance(chunk, bytes) or not chunk:
-                    raise OfflineExecutorHostError("offline_executor_raw_chunk_invalid")
-                total += len(chunk)
-                if total > task.expected_raw_size:
-                    raise OfflineExecutorHostError("offline_executor_raw_size_mismatch")
-                digest.update(chunk)
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-    except OSError as exc:
-        raise OfflineExecutorHostError("offline_executor_raw_stage_failed") from exc
-    if total != task.expected_raw_size or digest.hexdigest() != task.expected_raw_digest:
-        raise OfflineExecutorHostError("offline_executor_raw_evidence_mismatch")
+    if not isinstance(components, tuple) or len(components) != 2:
+        raise OfflineExecutorHostError("offline_executor_component_closure_invalid")
+    selected: dict[str, OfflineExecutorComponent] = {}
+    for component in components:
+        if not isinstance(component, OfflineExecutorComponent):
+            raise OfflineExecutorHostError("offline_executor_component_closure_invalid")
+        expected_name = {"manifest": "manifest.json", "main": "main.js"}.get(
+            component.role
+        )
+        if (
+            expected_name is None
+            or component.name != expected_name
+            or component.role in selected
+            or not isinstance(component.content, bytes)
+            or not component.content
+        ):
+            raise OfflineExecutorHostError("offline_executor_component_closure_invalid")
+        selected[component.role] = component
+    if set(selected) != {"manifest", "main"}:
+        raise OfflineExecutorHostError("offline_executor_component_closure_incomplete")
+    evidence = {
+        "manifest": (task.expected_manifest_size, task.expected_manifest_digest),
+        "main": (task.expected_main_size, task.expected_main_digest),
+    }
+    for role, component in selected.items():
+        expected_size, expected_digest = evidence[role]
+        if (
+            len(component.content) != expected_size
+            or sha256(component.content).hexdigest() != expected_digest
+        ):
+            raise OfflineExecutorHostError("offline_executor_component_evidence_mismatch")
 
 
 def _run_docker(
     command: tuple[str, ...],
-    raw_path: Path,
+    components: tuple[OfflineExecutorComponent, ...],
     output: BinaryIO,
     task: OfflineExecutorTask,
 ) -> None:
@@ -298,8 +330,7 @@ def _run_docker(
         )
         if child.stdin is None:
             raise OfflineExecutorHostError("offline_executor_stdin_unavailable")
-        with raw_path.open("rb") as raw:
-            _write_request(child.stdin, raw, task)
+        _write_request(child.stdin, components, task)
         child.stdin.close()
         try:
             return_code = child.wait(timeout=120)
@@ -329,27 +360,24 @@ def _run_docker(
 
 
 def _write_request(
-    stdin: IO[bytes], raw: BinaryIO, task: OfflineExecutorTask
+    stdin: BinaryIO,
+    components: tuple[OfflineExecutorComponent, ...],
+    task: OfflineExecutorTask,
 ) -> None:
-    prefix = (
-        '{"materialization_target_digest":"'
-        + task.materialization_target_digest
-        + '","policy_revision":'
-        + str(task.policy_revision)
-        + ',"protocol":"'
-        + PUBLIC_EXECUTOR_PROTOCOL
-        + '","zip_base64":"'
-    ).encode("ascii")
-    stdin.write(prefix)
-    carry = b""
-    while chunk := raw.read(64 * 1024):
-        payload = carry + chunk
-        boundary = len(payload) - len(payload) % 3
-        stdin.write(base64.b64encode(payload[:boundary]))
-        carry = payload[boundary:]
-    if carry:
-        stdin.write(base64.b64encode(carry))
-    stdin.write(b'"}')
+    request = {
+        "components": [
+            {
+                "content_base64": base64.b64encode(component.content).decode("ascii"),
+                "name": component.name,
+                "role": component.role,
+            }
+            for component in components
+        ],
+        "materialization_target_digest": task.materialization_target_digest,
+        "policy_revision": task.policy_revision,
+        "protocol": PUBLIC_EXECUTOR_PROTOCOL,
+    }
+    stdin.write(_canonical_json(request))
     stdin.flush()
 
 
@@ -387,6 +415,7 @@ def _validate_result(result: bytes, task: OfflineExecutorTask) -> None:
 
 __all__ = [
     "FIXED_PYTHON_IMAGE",
+    "OfflineExecutorComponent",
     "OfflineExecutorHost",
     "OfflineExecutorHostError",
     "OfflineExecutorTask",

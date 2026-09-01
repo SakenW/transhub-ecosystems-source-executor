@@ -7,8 +7,8 @@ include tokens, credentials, private source archives, production URLs, or user
 data in an issue, pull request, workflow log, or proof of concept.
 
 Include the affected file and revision, a bounded reproduction, the expected
-security boundary, and the observed result. Reports involving archive escape,
-resource exhaustion, raw-byte persistence, credential exposure, OIDC/ref
+security boundary, and the observed result. Reports involving component
+confusion, resource exhaustion, source-byte persistence, credential exposure, OIDC/ref
 confusion, digest/profile bypass, or result-binding bypass are especially
 useful.
 

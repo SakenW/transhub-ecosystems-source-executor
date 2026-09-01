@@ -34,7 +34,7 @@ def build(output: Path) -> dict[str, object]:
     with ZipFile(output, "w", compression=ZIP_STORED, strict_timestamps=True) as archive:
         for name in sorted(files):
             payload = (
-                b"from adapters.obsidian.zip_bridge import public_main\npublic_main()\n"
+                b"from adapters.obsidian.component_bridge import public_main\npublic_main()\n"
                 if name == "__main__.py"
                 else (REPOSITORY_ROOT / name).read_bytes()
             )

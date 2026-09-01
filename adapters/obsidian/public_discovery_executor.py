@@ -16,13 +16,15 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Final, Protocol, TypeVar, cast
+from typing import Final, Literal, Protocol, TypeVar, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
+from .component_bridge import MAX_MAIN_BYTES, MAX_MANIFEST_BYTES
 from .offline_executor_host import (
+    OfflineExecutorComponent,
     OfflineExecutorHost,
     OfflineExecutorHostError,
     OfflineExecutorTask,
@@ -99,7 +101,8 @@ class SourcePlan:
     repository_id: int
     repository_name: str
     release_id: int
-    primary_asset: Asset
+    manifest_asset: Asset
+    main_asset: Asset
     projection_generation: int
     authority_binding_digest: str
     source_plan_digest: str
@@ -148,7 +151,7 @@ class ControlPlane(Protocol):
 
 
 class SourceReader(Protocol):
-    def chunks(self, plan: SourcePlan) -> Iterable[bytes]: ...
+    def chunks(self, plan: SourcePlan, asset: Asset) -> Iterable[bytes]: ...
 
 
 class ResultUploader(Protocol):
@@ -268,9 +271,22 @@ class HttpControlPlane:
                 )
             )
         primary_id = _positive_int(value["primaryAssetId"], "executor_source_plan_invalid")
-        primary = [asset for asset in assets if asset.asset_id == primary_id]
-        if len(primary) != 1 or len({asset.asset_id for asset in assets}) != len(assets):
+        if (
+            sum(asset.asset_id == primary_id for asset in assets) != 1
+            or len({asset.asset_id for asset in assets}) != len(assets)
+            or len({asset.name for asset in assets}) != len(assets)
+        ):
             raise ExecutorError("executor_source_plan_invalid")
+        manifest = [asset for asset in assets if asset.name == "manifest.json"]
+        main = [asset for asset in assets if asset.name == "main.js"]
+        if (
+            len(manifest) != 1
+            or len(main) != 1
+            or not 1 <= manifest[0].size <= MAX_MANIFEST_BYTES
+            or not 1 <= main[0].size <= MAX_MAIN_BYTES
+            or primary_id != main[0].asset_id
+        ):
+            raise ExecutorError("executor_source_component_closure_incomplete")
         owner_login = _identifier(value["ownerLogin"], 39, "executor_source_plan_invalid")
         repository_name = _identifier(
             value["repositoryName"], 100, "executor_source_plan_invalid", extra="._-"
@@ -287,7 +303,8 @@ class HttpControlPlane:
             _positive_int(value["repositoryId"], "executor_source_plan_invalid"),
             repository_name,
             _positive_int(value["releaseId"], "executor_source_plan_invalid"),
-            primary[0],
+            manifest[0],
+            main[0],
             _positive_int(value["projectionGeneration"], "executor_source_plan_invalid"),
             _digest(value["authorityBindingDigest"], "executor_source_plan_invalid"),
             _digest(value["sourcePlanDigest"], "executor_source_plan_invalid"),
@@ -405,16 +422,16 @@ class HttpControlPlane:
 
 
 class GitHubReleaseAssetReader:
-    """Download only the frozen primary asset; no server-provided locator is used."""
+    """Download one frozen component asset; no server-provided locator is used."""
 
-    def chunks(self, plan: SourcePlan) -> Iterable[bytes]:
+    def chunks(self, plan: SourcePlan, asset: Asset) -> Iterable[bytes]:
         path = (
             "/repos/"
             + quote(plan.owner_login, safe="")
             + "/"
             + quote(plan.repository_name, safe="")
             + "/releases/assets/"
-            + str(plan.primary_asset.asset_id)
+            + str(asset.asset_id)
         )
         request = Request(
             _GITHUB_API_ORIGIN + path,
@@ -431,7 +448,7 @@ class GitHubReleaseAssetReader:
                     raise ExecutorError("executor_source_download_failed", retryable=True)
                 length = response.headers.get("Content-Length")
                 if length is not None and (
-                    not length.isdigit() or int(length) != plan.primary_asset.size
+                    not length.isdigit() or int(length) != asset.size
                 ):
                     raise ExecutorError("executor_source_size_mismatch")
                 while chunk := response.read(64 * 1024):
@@ -504,24 +521,24 @@ def execute_one(
         task = OfflineExecutorTask(
             adapter_artifact_digest=plan.adapter_build_digest,
             adapter_profile_digest=plan.adapter_profile_digest,
-            expected_raw_digest=plan.primary_asset.sha256,
-            expected_raw_size=plan.primary_asset.size,
+            expected_manifest_digest=plan.manifest_asset.sha256,
+            expected_manifest_size=plan.manifest_asset.size,
+            expected_main_digest=plan.main_asset.sha256,
+            expected_main_size=plan.main_asset.size,
             materialization_target_digest=plan.materialization_target_digest,
             policy_revision=plan.projection_generation,
             result_max_bytes=plan.result_max_bytes,
         )
 
         def prepare() -> bytes:
-            raw_chunks = source.chunks(plan)
-            try:
-                result = host_factory(config.artifact).prepare_result(raw_chunks, task)
-                if not isinstance(result, bytes):
-                    raise ExecutorError("executor_result_type_invalid")
-                return result
-            finally:
-                close_chunks = getattr(raw_chunks, "close", None)
-                if callable(close_chunks):
-                    close_chunks()
+            components = (
+                _read_component(source, plan, "manifest", plan.manifest_asset),
+                _read_component(source, plan, "main", plan.main_asset),
+            )
+            result = host_factory(config.artifact).prepare_result(components, task)
+            if not isinstance(result, bytes):
+                raise ExecutorError("executor_result_type_invalid")
+            return result
 
         result = _retry(prepare)
         grant_command_id = str(uuid4())
@@ -568,13 +585,42 @@ def _retry(operation: Callable[[], "_T"], attempts: int = 3) -> "_T":
     raise AssertionError("unreachable")
 
 
+def _read_component(
+    source: SourceReader,
+    plan: SourcePlan,
+    role: Literal["manifest", "main"],
+    asset: Asset,
+) -> OfflineExecutorComponent:
+    expected_name = "manifest.json" if role == "manifest" else "main.js"
+    if asset.name != expected_name or asset.size < 1:
+        raise ExecutorError("executor_source_component_invalid")
+    chunks = source.chunks(plan, asset)
+    content = bytearray()
+    digest = sha256()
+    try:
+        for chunk in chunks:
+            if not isinstance(chunk, bytes) or not chunk:
+                raise ExecutorError("executor_source_chunk_invalid")
+            if len(content) + len(chunk) > asset.size:
+                raise ExecutorError("executor_source_size_mismatch")
+            content.extend(chunk)
+            digest.update(chunk)
+    finally:
+        close_chunks = getattr(chunks, "close", None)
+        if callable(close_chunks):
+            close_chunks()
+    if len(content) != asset.size or digest.hexdigest() != asset.sha256:
+        raise ExecutorError("executor_source_evidence_mismatch")
+    return OfflineExecutorComponent(role, expected_name, bytes(content))
+
+
 _T = TypeVar("_T")
 
 
 def _failure_code(code: str, *, retryable: bool) -> str:
     if retryable:
         return "executor_workflow_failed"
-    if "source" in code or "raw" in code:
+    if "source" in code or "component" in code:
         return "source_validation_rejected"
     if "profile" in code or "binding" in code:
         return "registry_projection_changed"
