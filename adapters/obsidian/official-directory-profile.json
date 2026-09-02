@@ -1,0 +1,25 @@
+{
+  "schema": "trans-hub.official-directory-validator-profile.v1",
+  "registryKey": "official-directory",
+  "provider": "github-rest",
+  "apiVersion": "2026-03-10",
+  "directoryRepository": {
+    "repositoryId": 262342594,
+    "ownerId": 65011256,
+    "ownerLogin": "obsidianmd",
+    "repositoryName": "obsidian-releases",
+    "defaultBranch": "master"
+  },
+  "directoryPath": "community-plugins.json",
+  "maxDirectoryBytes": 8388608,
+  "requiredReleaseAssets": [
+    {
+      "name": "main.js",
+      "maxBytes": 66060288
+    },
+    {
+      "name": "manifest.json",
+      "maxBytes": 1048576
+    }
+  ]
+}
