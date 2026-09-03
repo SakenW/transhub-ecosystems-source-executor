@@ -14,6 +14,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from hashlib import sha1, sha256
 from math import isfinite
 from pathlib import Path
@@ -157,7 +158,7 @@ class RegistryResolutionClaim:
 
 @dataclass(frozen=True, slots=True)
 class RegistrySnapshot:
-    revision: str
+    revision: int
     commit_sha: str
     content_digest: str
 
@@ -1014,12 +1015,13 @@ def resolve_official_directory_claim(
         )
     )
     commit_sha, tree_sha = _commit_identity(directory_commit)
+    registry_revision = _commit_revision(directory_commit, commit_sha)
     directory_tree = _retry(
         lambda: github.json_object(
             repository_path + "/git/trees/" + quote(tree_sha, safe="")
         )
     )
-    revision, directory_size = _directory_blob_identity(
+    blob_sha, directory_size = _directory_blob_identity(
         directory_tree, tree_sha, profile
     )
     directory_body = _retry(
@@ -1038,10 +1040,10 @@ def resolve_official_directory_claim(
         f"blob {len(directory_body)}\0".encode("ascii") + directory_body,
         usedforsecurity=False,
     ).hexdigest()
-    if git_blob_sha != revision:
+    if git_blob_sha != blob_sha:
         raise ExecutorError("registry_directory_revision_mismatch")
     registry = RegistrySnapshot(
-        revision=revision,
+        revision=registry_revision,
         commit_sha=commit_sha,
         content_digest=sha256(directory_body).hexdigest(),
     )
@@ -1103,6 +1105,28 @@ def _validate_registry_resolution_binding(
 
 def _github_repository_path(owner: str, repository: str) -> str:
     return "/repos/" + quote(owner, safe="") + "/" + quote(repository, safe="")
+
+
+def _commit_revision(value: Mapping[str, object], commit_sha: str) -> int:
+    commit = value.get("commit")
+    if not isinstance(commit, Mapping):
+        raise ExecutorError("registry_commit_metadata_invalid")
+    committer = commit.get("committer")
+    if not isinstance(committer, Mapping):
+        raise ExecutorError("registry_commit_metadata_invalid")
+    timestamp = committer.get("date")
+    if not isinstance(timestamp, str):
+        raise ExecutorError("registry_commit_metadata_invalid")
+    try:
+        instant = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise ExecutorError("registry_commit_metadata_invalid") from None
+    if instant.tzinfo is None:
+        raise ExecutorError("registry_commit_metadata_invalid")
+    seconds = int(instant.astimezone(UTC).timestamp())
+    if seconds < 1:
+        raise ExecutorError("registry_commit_metadata_invalid")
+    return seconds * 1_000_000 + int(commit_sha[:5], 16)
 
 
 def _validate_directory_repository(

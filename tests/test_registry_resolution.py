@@ -131,7 +131,10 @@ class _Github:
             },
             directory_repository_path + f"/commits/{profile.default_branch}": {
                 "sha": DIRECTORY_COMMIT,
-                "commit": {"tree": {"sha": DIRECTORY_TREE}},
+                "commit": {
+                    "tree": {"sha": DIRECTORY_TREE},
+                    "committer": {"date": "2026-09-03T00:00:00Z"},
+                },
             },
             directory_repository_path + f"/git/trees/{DIRECTORY_TREE}": {
                 "sha": DIRECTORY_TREE,
@@ -177,7 +180,10 @@ class _Github:
             },
             plugin_repository_path + "/commits/1.0.0": {
                 "sha": RELEASE_COMMIT,
-                "commit": {"tree": {"sha": RELEASE_TREE}},
+                "commit": {
+                    "tree": {"sha": RELEASE_TREE},
+                    "committer": {"date": "2026-09-03T00:00:00Z"},
+                },
             },
         }
 
@@ -729,7 +735,7 @@ class RegistryResolutionTests(unittest.TestCase):
         assert claim is not None
         result = RegistryResolutionResult(
             "absent",
-            RegistrySnapshot("ab" * 20, "cd" * 20, "ef" * 32),
+            RegistrySnapshot(1, "cd" * 20, "ef" * 32),
             None,
             None,
             None,
@@ -767,7 +773,7 @@ class RegistryResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             cast(dict[str, object], captured[1][2])["evidenceDigest"],
-            "519fc1e2bd9a24a8e24d2db425f76db91c67f8fce85746bb0a244b07a06cdfd7",
+            "75cb62e2b05524255cf1c03572365fa477b9edde2bcc9ffb8cc5d56aa47d8510",
         )
         self.assertEqual(
             captured[2][1],
