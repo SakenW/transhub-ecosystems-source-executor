@@ -58,10 +58,17 @@ _OFFICIAL_DIRECTORY_PATH: Final = "community-plugins.json"
 class ExecutorError(RuntimeError):
     """A bounded diagnostic that is safe to emit without exception context."""
 
-    def __init__(self, code: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool = False,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        self.http_status = http_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -1609,9 +1616,11 @@ def _open_bytes(request: Request, limit: int, code: str) -> bytes:
                 raise ExecutorError(code)
             return body
     except HTTPError as exc:
-        error = ExecutorError(code, retryable=exc.code in {408, 425, 429, 500, 502, 503, 504})
-        error.http_status = exc.code  # type: ignore[attr-defined]
-        raise error from None
+        raise ExecutorError(
+            code,
+            retryable=exc.code in {408, 425, 429, 500, 502, 503, 504},
+            http_status=exc.code,
+        ) from None
     except (OSError, URLError):
         raise ExecutorError(code, retryable=True) from None
 
@@ -1826,6 +1835,14 @@ def _safe_diagnostic_code(code: str) -> str:
     return code
 
 
+def _safe_failure_diagnostic(error: ExecutorError) -> str:
+    code = _safe_diagnostic_code(error.code)
+    status = error.http_status
+    if status is None or status < 100 or status > 999:
+        return code
+    return f"{code}:http_{status}"
+
+
 def main() -> int:
     try:
         config = ExecutorConfig.from_environment(os.environ)
@@ -1841,7 +1858,11 @@ def main() -> int:
             uploader=QiniuResultUploader(),
         )
     except (ExecutorError, OfflineExecutorHostError) as exc:
-        code = exc.code if isinstance(exc, ExecutorError) else str(exc)
+        code = (
+            _safe_failure_diagnostic(exc)
+            if isinstance(exc, ExecutorError)
+            else _safe_diagnostic_code(str(exc))
+        )
         print("public_discovery_executor_failed:" + code, file=sys.stderr)
         return 1
     print(outcome)

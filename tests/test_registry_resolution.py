@@ -22,6 +22,7 @@ from adapters.obsidian.public_discovery_executor import (
     execute_registry_resolution_one,
     load_official_directory_profile,
     _safe_diagnostic_code,
+    _safe_failure_diagnostic,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -295,6 +296,16 @@ class RegistryResolutionTests(unittest.TestCase):
             "registry_release_asset_digest_mismatch",
         )
         self.assertEqual(_safe_diagnostic_code("token\\nvalue"), "unknown")
+        self.assertEqual(
+            _safe_failure_diagnostic(
+                ExecutorError("executor_result_upload_failed", http_status=631)
+            ),
+            "executor_result_upload_failed:http_631",
+        )
+        self.assertEqual(
+            _safe_failure_diagnostic(ExecutorError("token\\nvalue", http_status=1000)),
+            "unknown",
+        )
 
     def test_profile_is_fixed_and_drift_fails_closed(self) -> None:
         self.assertEqual(self.profile.registry_key, "official-directory")
