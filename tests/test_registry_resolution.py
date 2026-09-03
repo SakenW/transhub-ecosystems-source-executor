@@ -70,6 +70,7 @@ class _RegistryControl:
         self.claim_value = claim
         self.results: list[dict[str, object]] = []
         self.failures: list[tuple[str, str]] = []
+        self.failure_claims: list[RegistryResolutionClaim] = []
         self.result_commands: list[str] = []
         self.failure_commands: list[str] = []
 
@@ -91,11 +92,12 @@ class _RegistryControl:
     def registry_resolution_fail(
         self,
         _token: str,
-        _claim: RegistryResolutionClaim,
+        claim: RegistryResolutionClaim,
         failure_code: str,
         evidence_digest: str,
         command_id: str,
     ) -> None:
+        self.failure_claims.append(claim)
         self.failure_commands.append(command_id)
         self.failures.append((failure_code, evidence_digest))
 
@@ -336,6 +338,14 @@ class RegistryResolutionTests(unittest.TestCase):
             )
         self.assertEqual(github.calls, [])
         self.assertEqual(control.failures[0][0], "registry_profile_changed")
+        self.assertEqual(
+            control.failure_claims[0].registry_authority_digest,
+            self.profile.authority_digest,
+        )
+        self.assertEqual(
+            control.failure_claims[0].validator_profile_digest,
+            self.profile.profile_digest,
+        )
 
     def test_present_result_contains_only_bound_metadata_and_digests(self) -> None:
         control = _RegistryControl(_claim(self.profile))

@@ -974,12 +974,25 @@ def execute_registry_resolution_one(
         failure_code = _registry_resolution_failure_code(
             exc.code, retryable=exc.retryable
         )
+        # A profile-change receipt must name the currently approved profile,
+        # not the stale one embedded in the leased job.  The database uses
+        # those two digests to atomically advance the registry generation and
+        # requeue the same job under the active validator contract.
+        failure_claim = (
+            replace(
+                claim,
+                registry_authority_digest=profile.authority_digest,
+                validator_profile_digest=profile.profile_digest,
+            )
+            if failure_code == "registry_profile_changed"
+            else claim
+        )
         failure_command_id = str(uuid4())
         try:
             _retry(
                 lambda: control.registry_resolution_fail(
                     tokens.token(),
-                    claim,
+                    failure_claim,
                     failure_code,
                     _registry_resolution_failure_evidence(
                         claim, failure_code, exc.code
