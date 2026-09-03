@@ -13,7 +13,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha1, sha256
 from math import isfinite
 from pathlib import Path
@@ -105,7 +105,7 @@ class Asset:
     asset_id: int
     name: str
     size: int
-    sha256: str
+    sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +204,12 @@ class RegistryResolutionResult:
             "registryContentDigest": self.registry.content_digest,
         }
         if self.status == "present":
-            if self.entry_digest is None or self.repository is None or self.release is None:
+            if (
+                self.entry_digest is None
+                or self.repository is None
+                or self.release is None
+                or any(asset.sha256 is None for asset in self.assets)
+            ):
                 raise ExecutorError("registry_resolution_result_invalid")
             value.update(
                 {
@@ -301,6 +306,10 @@ class GitHubMetadataReader(Protocol):
     def json_object(self, path: str) -> dict[str, object]: ...
 
     def raw_bytes(self, path: str, limit: int) -> bytes: ...
+
+    def release_asset_digest(
+        self, owner_login: str, repository_name: str, asset: Asset
+    ) -> str: ...
 
 
 class SourceReader(Protocol):
@@ -466,6 +475,13 @@ class HttpGitHubMetadataReader:
 
     def raw_bytes(self, path: str, limit: int) -> bytes:
         return self._request(path, "application/vnd.github.raw+json", limit)
+
+    def release_asset_digest(
+        self, owner_login: str, repository_name: str, asset: Asset
+    ) -> str:
+        return GitHubReleaseAssetReader(self._token).release_asset_digest(
+            owner_login, repository_name, asset
+        )
 
     def _request(self, path: str, accept: str, limit: int) -> bytes:
         if not path.startswith("/") or "//" in path or "\\" in path:
@@ -837,11 +853,31 @@ class GitHubReleaseAssetReader:
         self._token = _github_api_token(token)
 
     def chunks(self, plan: SourcePlan, asset: Asset) -> Iterable[bytes]:
+        return self._chunks(plan.owner_login, plan.repository_name, asset)
+
+    def release_asset_digest(
+        self, owner_login: str, repository_name: str, asset: Asset
+    ) -> str:
+        digest = sha256()
+        size = 0
+        for chunk in self._chunks(owner_login, repository_name, asset):
+            size += len(chunk)
+            digest.update(chunk)
+        if size != asset.size:
+            raise ExecutorError("registry_release_asset_size_mismatch")
+        actual = digest.hexdigest()
+        if asset.sha256 is not None and actual != asset.sha256:
+            raise ExecutorError("registry_release_asset_digest_mismatch")
+        return actual
+
+    def _chunks(
+        self, owner_login: str, repository_name: str, asset: Asset
+    ) -> Iterable[bytes]:
         path = (
             "/repos/"
-            + quote(plan.owner_login, safe="")
+            + quote(owner_login, safe="")
             + "/"
-            + quote(plan.repository_name, safe="")
+            + quote(repository_name, safe="")
             + "/releases/assets/"
             + str(asset.asset_id)
         )
@@ -1026,6 +1062,17 @@ def resolve_official_directory_claim(
     )
     release_id, release_tag, assets = _latest_release_identity(
         release_value, profile
+    )
+    assets = tuple(
+        replace(
+            asset,
+            sha256=_retry(
+                lambda asset=asset: github.release_asset_digest(
+                    owner_login, repository_name, asset
+                )
+            ),
+        )
+        for asset in assets
     )
     release_commit_value = _retry(
         lambda: github.json_object(
@@ -1215,10 +1262,10 @@ def _latest_release_identity(
             raise ExecutorError("registry_release_assets_invalid")
         raw_asset = cast(dict[str, object], matches[0])
         digest = raw_asset.get("digest")
-        if (
-            raw_asset.get("state") != "uploaded"
-            or not isinstance(digest, str)
-            or not digest.startswith("sha256:")
+        if raw_asset.get("state") != "uploaded":
+            raise ExecutorError("registry_release_assets_invalid")
+        if digest is not None and (
+            not isinstance(digest, str) or not digest.startswith("sha256:")
         ):
             raise ExecutorError("registry_release_assets_invalid")
         selected.append(
@@ -1233,7 +1280,9 @@ def _latest_release_identity(
                     limits[name],
                     "registry_release_assets_invalid",
                 ),
-                _digest(
+                None
+                if digest is None
+                else _digest(
                     digest.removeprefix("sha256:"),
                     "registry_release_assets_invalid",
                 ),
@@ -1428,7 +1477,11 @@ def _read_component(
         close_chunks = getattr(chunks, "close", None)
         if callable(close_chunks):
             close_chunks()
-    if len(content) != asset.size or digest.hexdigest() != asset.sha256:
+    if (
+        asset.sha256 is None
+        or len(content) != asset.size
+        or digest.hexdigest() != asset.sha256
+    ):
         raise ExecutorError("executor_source_evidence_mismatch")
     return OfflineExecutorComponent(role, expected_name, bytes(content))
 

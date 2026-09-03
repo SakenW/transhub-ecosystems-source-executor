@@ -194,6 +194,22 @@ class _Github:
         self.raw_path = path
         return self.raw
 
+    def release_asset_digest(
+        self, owner_login: str, repository_name: str, asset: object
+    ) -> str:
+        self.calls.append(
+            f"/repos/{owner_login}/{repository_name}/releases/assets"
+        )
+        name = getattr(asset, "name")
+        value = {"main.js": MAIN, "manifest.json": MANIFEST}.get(name)
+        if value is None:
+            raise AssertionError(f"unexpected asset: {name}")
+        actual = sha256(value).hexdigest()
+        declared = getattr(asset, "sha256")
+        if declared is not None and declared != actual:
+            raise ExecutorError("registry_release_asset_digest_mismatch")
+        return actual
+
     def _maybe_transient(self, path: str) -> None:
         if path != self.transient_path:
             return
@@ -525,20 +541,37 @@ class RegistryResolutionTests(unittest.TestCase):
         self.assertEqual(len(failure_control.failure_commands), 2)
         self.assertEqual(len(set(failure_control.failure_commands)), 1)
 
-    def test_release_asset_digest_or_directory_integrity_mismatch_is_rejected(self) -> None:
+    def test_release_assets_without_github_digest_are_hashed_in_memory(self) -> None:
         github = _Github(self.profile, self.present_body)
         release = github.values["/repos/plugin-owner/example-repo/releases/latest"]
         assets = cast(list[dict[str, object]], release["assets"])
         assets[0]["digest"] = None
         control = _RegistryControl(_claim(self.profile))
-        with self.assertRaisesRegex(ExecutorError, "registry_release_assets_invalid"):
+        self.assertEqual(
             execute_registry_resolution_one(
                 tokens=_Tokens(),
                 control=control,
                 github=github,
                 profile=self.profile,
+            ),
+            "registry_resolution_present",
+        )
+        result_assets = cast(list[dict[str, object]], control.results[0]["assets"])
+        self.assertEqual(result_assets[0]["sha256"], sha256(MAIN).hexdigest())
+
+        mismatched = _Github(self.profile, self.present_body)
+        mismatched_release = mismatched.values[
+            "/repos/plugin-owner/example-repo/releases/latest"
+        ]
+        mismatched_assets = cast(list[dict[str, object]], mismatched_release["assets"])
+        mismatched_assets[0]["digest"] = "sha256:" + "00" * 32
+        with self.assertRaisesRegex(ExecutorError, "registry_release_asset_digest_mismatch"):
+            execute_registry_resolution_one(
+                tokens=_Tokens(),
+                control=_RegistryControl(_claim(self.profile)),
+                github=mismatched,
+                profile=self.profile,
             )
-        self.assertEqual(control.results, [])
 
     def test_nonstandard_or_invalid_unicode_directory_never_becomes_absent(self) -> None:
         bodies = (
