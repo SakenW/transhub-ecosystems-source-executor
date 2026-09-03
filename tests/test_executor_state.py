@@ -277,6 +277,38 @@ class ExecutorStateTests(unittest.TestCase):
             public_discovery_executor._open_bytes = original
         self.assertEqual(attempted, list(grant.upload_origins))
 
+    def test_result_uploader_reports_only_bounded_failure_classes(self) -> None:
+        grant = UploadGrant(
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+            "short-lived",
+            "public-discovery/results/" + "12" * 32 + ".canonical-json",
+            ("https://first-upload.example.test", "https://second-upload.example.test"),
+            "application/vnd.trans-hub.public-discovery-result+json",
+            2,
+        )
+        original = public_discovery_executor._open_bytes
+        calls = 0
+
+        def upload(_request: object, _limit: int, _code: str) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ExecutorError(
+                    "executor_result_upload_failed", http_status=631
+                )
+            raise ExecutorError("executor_result_upload_failed", retryable=True)
+
+        public_discovery_executor._open_bytes = upload
+        try:
+            with self.assertRaisesRegex(
+                ExecutorError,
+                "executor_result_upload_failed_http_631_network",
+            ):
+                QiniuResultUploader().upload(grant, b"{}")
+        finally:
+            public_discovery_executor._open_bytes = original
+
     def test_source_plan_requires_manifest_and_main_release_assets(self) -> None:
         client = HttpControlPlane("https://api.example.test")
         payload = {

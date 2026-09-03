@@ -930,7 +930,8 @@ class QiniuResultUploader:
                 f"--{boundary}--\r\n".encode("ascii"),
             )
         )
-        last_error: ExecutorError | None = None
+        failed_attempts: list[str] = []
+        retryable = False
         for origin in grant.upload_origins:
             request = Request(
                 origin,
@@ -945,7 +946,12 @@ class QiniuResultUploader:
             except ExecutorError as exc:
                 if getattr(exc, "http_status", None) == 614:
                     return
-                last_error = exc
+                failed_attempts.append(
+                    f"http_{exc.http_status}"
+                    if exc.http_status is not None
+                    else "network"
+                )
+                retryable = retryable or exc.retryable
                 continue
             try:
                 value = cast(dict[str, object], json.loads(response_body))
@@ -956,9 +962,10 @@ class QiniuResultUploader:
             if value.get("key") not in {None, grant.object_key}:
                 raise ExecutorError("executor_result_upload_response_invalid")
             return
-        if last_error is not None:
-            raise last_error
-        raise ExecutorError("executor_result_upload_failed")
+        suffix = "_".join(failed_attempts) or "no_origin"
+        raise ExecutorError(
+            f"executor_result_upload_failed_{suffix}", retryable=retryable
+        )
 
 
 def execute_registry_resolution_one(
@@ -1612,7 +1619,9 @@ def _open_bytes(request: Request, limit: int, code: str) -> bytes:
     try:
         with urlopen(request, timeout=30) as response:
             body = cast(bytes, response.read(limit + 1))
-            if response.status != 200 or len(body) > limit:
+            if response.status != 200:
+                raise ExecutorError(code, http_status=response.status)
+            if len(body) > limit:
                 raise ExecutorError(code)
             return body
     except HTTPError as exc:
