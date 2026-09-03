@@ -988,7 +988,9 @@ def execute_registry_resolution_one(
             )
         except ExecutorError:
             raise ExecutorError(
-                "registry_resolution_failure_close_unconfirmed", retryable=True
+                "registry_resolution_failure_close_unconfirmed:"
+                + _safe_diagnostic_code(exc.code),
+                retryable=True,
             ) from None
         raise ExecutorError(exc.code, retryable=exc.retryable) from None
 
@@ -1768,6 +1770,12 @@ def _github_api_headers(
     if token is not None:
         headers["Authorization"] = "Bearer " + token
     return headers
+
+
+def _safe_diagnostic_code(code: str) -> str:
+    if re.fullmatch(r"[a-z0-9_]{1,128}", code) is None:
+        return "unknown"
+    return code
 
 
 def main() -> int:

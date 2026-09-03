@@ -21,6 +21,7 @@ from adapters.obsidian.public_discovery_executor import (
     execute_fair_cycle,
     execute_registry_resolution_one,
     load_official_directory_profile,
+    _safe_diagnostic_code,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -279,6 +280,13 @@ class RegistryResolutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ExecutorError, "executor_github_token_invalid"):
             HttpGitHubMetadataReader("token" + chr(10) + "header")
+
+    def test_failure_diagnostics_are_bounded_codes_only(self) -> None:
+        self.assertEqual(
+            _safe_diagnostic_code("registry_release_asset_digest_mismatch"),
+            "registry_release_asset_digest_mismatch",
+        )
+        self.assertEqual(_safe_diagnostic_code("token\\nvalue"), "unknown")
 
     def test_profile_is_fixed_and_drift_fails_closed(self) -> None:
         self.assertEqual(self.profile.registry_key, "official-directory")
