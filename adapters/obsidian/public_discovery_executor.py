@@ -454,6 +454,9 @@ def load_official_directory_profile(
 class HttpGitHubMetadataReader:
     """Read bounded GitHub metadata and one pinned directory body in memory."""
 
+    def __init__(self, token: str | None = None) -> None:
+        self._token = _github_api_token(token)
+
     def json_object(self, path: str) -> dict[str, object]:
         return _strict_json_object(
             self._request(path, "application/vnd.github+json", _MAX_GITHUB_METADATA_BYTES),
@@ -469,11 +472,12 @@ class HttpGitHubMetadataReader:
             raise ExecutorError("registry_github_path_invalid")
         request = Request(
             _GITHUB_API_ORIGIN + path,
-            headers={
-                "Accept": accept,
-                "User-Agent": "trans-hub-official-directory-validator",
-                "X-GitHub-Api-Version": _GITHUB_REGISTRY_API_VERSION,
-            },
+            headers=_github_api_headers(
+                accept,
+                "trans-hub-official-directory-validator",
+                _GITHUB_REGISTRY_API_VERSION,
+                self._token,
+            ),
             method="GET",
         )
         try:
@@ -829,6 +833,9 @@ class HttpControlPlane:
 class GitHubReleaseAssetReader:
     """Download one frozen component asset; no server-provided locator is used."""
 
+    def __init__(self, token: str | None = None) -> None:
+        self._token = _github_api_token(token)
+
     def chunks(self, plan: SourcePlan, asset: Asset) -> Iterable[bytes]:
         path = (
             "/repos/"
@@ -840,11 +847,12 @@ class GitHubReleaseAssetReader:
         )
         request = Request(
             _GITHUB_API_ORIGIN + path,
-            headers={
-                "Accept": "application/octet-stream",
-                "User-Agent": "trans-hub-public-discovery-executor",
-                "X-GitHub-Api-Version": _GITHUB_RELEASE_API_VERSION,
-            },
+            headers=_github_api_headers(
+                "application/octet-stream",
+                "trans-hub-public-discovery-executor",
+                _GITHUB_RELEASE_API_VERSION,
+                self._token,
+            ),
             method="GET",
         )
         try:
@@ -1688,6 +1696,27 @@ def _form_file(boundary: str, content_type: str, value: bytes) -> bytes:
     )
 
 
+def _github_api_token(token: str | None) -> str | None:
+    if token is None or token == "":
+        return None
+    if "\r" in token or "\n" in token:
+        raise ExecutorError("executor_github_token_invalid")
+    return token
+
+
+def _github_api_headers(
+    accept: str, user_agent: str, api_version: str, token: str | None
+) -> dict[str, str]:
+    headers = {
+        "Accept": accept,
+        "User-Agent": user_agent,
+        "X-GitHub-Api-Version": api_version,
+    }
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
 def main() -> int:
     try:
         config = ExecutorConfig.from_environment(os.environ)
@@ -1697,9 +1726,9 @@ def main() -> int:
             config=config,
             tokens=tokens,
             control=control,
-            github=HttpGitHubMetadataReader(),
+            github=HttpGitHubMetadataReader(os.environ.get("GITHUB_TOKEN")),
             profile=load_official_directory_profile(),
-            source=GitHubReleaseAssetReader(),
+            source=GitHubReleaseAssetReader(os.environ.get("GITHUB_TOKEN")),
             uploader=QiniuResultUploader(),
         )
     except (ExecutorError, OfflineExecutorHostError) as exc:

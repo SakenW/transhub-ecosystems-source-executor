@@ -7,10 +7,12 @@ from hashlib import sha1, sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from unittest.mock import patch
 
 from adapters.obsidian.public_discovery_executor import (
     ExecutorConfig,
     ExecutorError,
+    HttpGitHubMetadataReader,
     HttpControlPlane,
     OfficialDirectoryProfile,
     RegistryResolutionClaim,
@@ -216,6 +218,51 @@ class RegistryResolutionTests(unittest.TestCase):
                 "repo": "another-owner/another-repo",
             },
         )
+
+    def test_github_actions_token_is_used_only_as_an_api_authorization_header(self) -> None:
+        captured: list[object] = []
+
+        class _Response:
+            status = 200
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def geturl(self) -> str:
+                return "https://api.github.com/repos/obsidianmd/obsidian-releases"
+
+            def read(self, _limit: int) -> bytes:
+                return b"{}"
+
+        def _open(request: object, *, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            captured.append(request)
+            return _Response()
+
+        with patch(
+            "adapters.obsidian.public_discovery_executor.urlopen", _open
+        ):
+            self.assertEqual(
+                HttpGitHubMetadataReader("gha-short-lived-token").json_object(
+                    "/repos/obsidianmd/obsidian-releases"
+                ),
+                {},
+            )
+
+        request = captured[0]
+        self.assertEqual(
+            getattr(request, "get_header")("Authorization"),
+            "Bearer gha-short-lived-token",
+        )
+        self.assertEqual(
+            getattr(request, "full_url"),
+            "https://api.github.com/repos/obsidianmd/obsidian-releases",
+        )
+        with self.assertRaisesRegex(ExecutorError, "executor_github_token_invalid"):
+            HttpGitHubMetadataReader("token" + chr(10) + "header")
 
     def test_profile_is_fixed_and_drift_fails_closed(self) -> None:
         self.assertEqual(self.profile.registry_key, "official-directory")
