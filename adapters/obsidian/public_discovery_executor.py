@@ -250,7 +250,7 @@ class UploadGrant:
     result_object_id: str
     token: str
     object_key: str
-    upload_origin: str
+    upload_origins: tuple[str, ...]
     content_type: str
     expected_size_bytes: int
 
@@ -923,28 +923,35 @@ class QiniuResultUploader:
                 f"--{boundary}--\r\n".encode("ascii"),
             )
         )
-        request = Request(
-            grant.upload_origin,
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
-        try:
-            response_body = _open_bytes(
-                request, _MAX_CONTROL_BYTES, "executor_result_upload_failed"
+        last_error: ExecutorError | None = None
+        for origin in grant.upload_origins:
+            request = Request(
+                origin,
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
             )
-        except ExecutorError as exc:
-            if getattr(exc, "http_status", None) == 614:
-                return
-            raise
-        try:
-            value = cast(dict[str, object], json.loads(response_body))
-        except (UnicodeError, json.JSONDecodeError):
-            raise ExecutorError("executor_result_upload_response_invalid") from None
-        if not isinstance(value, dict):
-            raise ExecutorError("executor_result_upload_response_invalid")
-        if value.get("key") not in {None, grant.object_key}:
-            raise ExecutorError("executor_result_upload_response_invalid")
+            try:
+                response_body = _open_bytes(
+                    request, _MAX_CONTROL_BYTES, "executor_result_upload_failed"
+                )
+            except ExecutorError as exc:
+                if getattr(exc, "http_status", None) == 614:
+                    return
+                last_error = exc
+                continue
+            try:
+                value = cast(dict[str, object], json.loads(response_body))
+            except (UnicodeError, json.JSONDecodeError):
+                raise ExecutorError("executor_result_upload_response_invalid") from None
+            if not isinstance(value, dict):
+                raise ExecutorError("executor_result_upload_response_invalid")
+            if value.get("key") not in {None, grant.object_key}:
+                raise ExecutorError("executor_result_upload_response_invalid")
+            return
+        if last_error is not None:
+            raise last_error
+        raise ExecutorError("executor_result_upload_failed")
 
 
 def execute_registry_resolution_one(
@@ -1562,10 +1569,14 @@ def _parse_upload_grant(body: bytes, expected_size: int, media_type: str) -> Upl
     origins = value["uploadOrigins"]
     if value["provider"] != "qiniu_kodo" or not isinstance(origins, list) or not origins:
         raise ExecutorError("executor_upload_grant_invalid")
-    origin = origins[0]
-    if not isinstance(origin, str):
-        raise ExecutorError("executor_upload_grant_invalid")
-    _validate_https_url(origin, allow_query=False)
+    validated_origins: list[str] = []
+    for origin in origins:
+        if not isinstance(origin, str):
+            raise ExecutorError("executor_upload_grant_invalid")
+        _validate_https_url(origin, allow_query=False)
+        if origin in validated_origins:
+            raise ExecutorError("executor_upload_grant_invalid")
+        validated_origins.append(origin)
     token = value["token"]
     key = value["objectKey"]
     if (
@@ -1584,7 +1595,7 @@ def _parse_upload_grant(body: bytes, expected_size: int, media_type: str) -> Upl
         _uuid_text(value["resultObjectId"], "executor_upload_grant_invalid"),
         token,
         key,
-        origin,
+        tuple(validated_origins),
         media_type,
         expected_size,
     )

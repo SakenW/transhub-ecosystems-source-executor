@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from adapters.obsidian.offline_executor_host import OfflineExecutorHostError
+from adapters.obsidian import public_discovery_executor
 from adapters.obsidian.public_discovery_executor import (
     Asset,
     Claim,
@@ -15,6 +16,7 @@ from adapters.obsidian.public_discovery_executor import (
     HttpControlPlane,
     SourcePlan,
     UploadGrant,
+    QiniuResultUploader,
     execute_one,
 )
 
@@ -52,7 +54,7 @@ def _grant() -> UploadGrant:
         "33333333-3333-4333-8333-333333333333",
         "short-lived",
         "public-discovery/results/" + "12" * 32 + ".canonical-json",
-        "https://upload.example.test",
+        ("https://upload.example.test",),
         "application/vnd.trans-hub.public-discovery-result+json",
         2,
     )
@@ -241,7 +243,39 @@ class ExecutorStateTests(unittest.TestCase):
                 "expectedSizeBytes": 2,
             },
         )
-        self.assertEqual(grant.upload_origin, "https://upload.example.test")
+        self.assertEqual(
+            grant.upload_origins,
+            ("https://upload.example.test", "https://fallback-upload.example.test"),
+        )
+
+    def test_result_uploader_tries_each_server_granted_origin(self) -> None:
+        grant = UploadGrant(
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+            "short-lived",
+            "public-discovery/results/" + "12" * 32 + ".canonical-json",
+            ("https://first-upload.example.test", "https://second-upload.example.test"),
+            "application/vnd.trans-hub.public-discovery-result+json",
+            2,
+        )
+        attempted: list[str] = []
+        original = public_discovery_executor._open_bytes
+
+        def upload(request: object, _limit: int, _code: str) -> bytes:
+            url = getattr(request, "full_url")
+            attempted.append(url)
+            if url == grant.upload_origins[0]:
+                error = ExecutorError("executor_result_upload_failed", retryable=True)
+                error.http_status = 503  # type: ignore[attr-defined]
+                raise error
+            return b'{"key":"' + grant.object_key.encode() + b'"}'
+
+        public_discovery_executor._open_bytes = upload
+        try:
+            QiniuResultUploader().upload(grant, b"{}")
+        finally:
+            public_discovery_executor._open_bytes = original
+        self.assertEqual(attempted, list(grant.upload_origins))
 
     def test_source_plan_requires_manifest_and_main_release_assets(self) -> None:
         client = HttpControlPlane("https://api.example.test")
