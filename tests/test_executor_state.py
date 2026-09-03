@@ -215,7 +215,10 @@ class ExecutorStateTests(unittest.TestCase):
                         "bucket": "result-bucket",
                         "objectKey": "public-discovery/results/" + "12" * 32 + ".canonical-json",
                         "token": "short-lived",
-                        "uploadOrigins": ["https://upload.example.test"],
+                        "uploadOrigins": [
+                            "https://upload.example.test",
+                            "https://fallback-upload.example.test",
+                        ],
                         "contentType": "application/vnd.trans-hub.public-discovery-result+json",
                         "expectedSizeBytes": 2,
                         "grantState": "upload_grant",
@@ -225,7 +228,9 @@ class ExecutorStateTests(unittest.TestCase):
             )
 
         client._request = request  # type: ignore[method-assign]
-        client.grant("oidc", _claim(), _plan(), b"{}", "44444444-4444-4444-8444-444444444444")
+        grant = client.grant(
+            "oidc", _claim(), _plan(), b"{}", "44444444-4444-4444-8444-444444444444"
+        )
 
         self.assertEqual(
             captured["payload"],
@@ -236,6 +241,7 @@ class ExecutorStateTests(unittest.TestCase):
                 "expectedSizeBytes": 2,
             },
         )
+        self.assertEqual(grant.upload_origin, "https://upload.example.test")
 
     def test_source_plan_requires_manifest_and_main_release_assets(self) -> None:
         client = HttpControlPlane("https://api.example.test")

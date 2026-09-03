@@ -1560,7 +1560,7 @@ def _parse_upload_grant(body: bytes, expected_size: int, media_type: str) -> Upl
         "executor_upload_grant_invalid",
     )
     origins = value["uploadOrigins"]
-    if value["provider"] != "qiniu_kodo" or not isinstance(origins, list) or len(origins) != 1:
+    if value["provider"] != "qiniu_kodo" or not isinstance(origins, list) or not origins:
         raise ExecutorError("executor_upload_grant_invalid")
     origin = origins[0]
     if not isinstance(origin, str):
