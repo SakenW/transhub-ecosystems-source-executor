@@ -68,6 +68,7 @@ class OfflineExecutorTask:
     expected_manifest_size: int
     expected_main_digest: str
     expected_main_size: int
+    authority_resource_version: str
     materialization_target_digest: str
     policy_revision: int
     result_max_bytes: int
@@ -93,6 +94,7 @@ class OfflineExecutorTask:
             or isinstance(self.policy_revision, bool)
             or self.policy_revision < 1
             or self.policy_revision > _MAX_SAFE_INTEGER
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.authority_resource_version) is None
         ):
             raise OfflineExecutorHostError("offline_executor_task_invalid")
 
@@ -373,6 +375,7 @@ def _write_request(
             }
             for component in components
         ],
+        "authority_resource_version": task.authority_resource_version,
         "materialization_target_digest": task.materialization_target_digest,
         "policy_revision": task.policy_revision,
         "protocol": PUBLIC_EXECUTOR_PROTOCOL,

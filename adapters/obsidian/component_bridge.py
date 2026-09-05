@@ -57,6 +57,7 @@ def handle_public_request(raw: bytes) -> bytes:
 
     request = _parse_unique_json(raw)
     if not isinstance(request, dict) or set(request) != {
+        "authority_resource_version",
         "components",
         "materialization_target_digest",
         "policy_revision",
@@ -66,6 +67,13 @@ def handle_public_request(raw: bytes) -> bytes:
     if request["protocol"] != PUBLIC_EXECUTOR_PROTOCOL:
         raise ObsidianComponentBridgeError("obsidian_public_executor_protocol_invalid")
     materialization_target_digest = request["materialization_target_digest"]
+    authority_resource_version = request["authority_resource_version"]
+    if (
+        not isinstance(authority_resource_version, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", authority_resource_version)
+        is None
+    ):
+        raise ObsidianComponentBridgeError("obsidian_public_executor_request_invalid")
     if not isinstance(materialization_target_digest, str) or not _DIGEST.fullmatch(
         materialization_target_digest
     ):
@@ -80,7 +88,7 @@ def handle_public_request(raw: bytes) -> bytes:
         raise ObsidianComponentBridgeError("obsidian_public_executor_request_invalid")
     components = _decode_components(request["components"])
     _validate_public_manifest_fields(components)
-    snapshot = _adapter_snapshot(components)
+    snapshot = _adapter_snapshot(components, authority_resource_version)
     validate_public_source_catalog(snapshot["source_catalog"])
     response = _canonical_json(
         {
@@ -326,6 +334,7 @@ def _jsonb_text_valid(value: object) -> bool:
 
 def _adapter_snapshot(
     closure: tuple[PublicComponent, ...],
+    authority_resource_version: str,
 ) -> dict[str, object]:
     components = {item.role: item.content for item in closure}
     locale_components: dict[str, tuple[str, bytes]] = {}
@@ -343,6 +352,7 @@ def _adapter_snapshot(
         registry_metadata_content=components.get("registry-metadata"),
         readme_content=components.get("readme"),
         native_locale_components=locale_components,
+        authority_resource_version=authority_resource_version,
     )
     snapshot = _parse_unique_json(raw)
     if not isinstance(snapshot, dict) or not isinstance(

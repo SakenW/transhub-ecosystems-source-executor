@@ -34,6 +34,7 @@ def _plan() -> SourcePlan:
         2,
         "official-plugin",
         3,
+        "0.5.70",
         Asset(4, "manifest.json", len(manifest), sha256(manifest).hexdigest()),
         Asset(5, "main.js", len(main), sha256(main).hexdigest()),
         6,

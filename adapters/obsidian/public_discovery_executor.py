@@ -123,6 +123,7 @@ class SourcePlan:
     repository_id: int
     repository_name: str
     release_id: int
+    release_tag: str
     manifest_asset: Asset
     main_asset: Asset
     projection_generation: int
@@ -736,6 +737,7 @@ class HttpControlPlane:
             _positive_int(value["repositoryId"], "executor_source_plan_invalid"),
             repository_name,
             _positive_int(value["releaseId"], "executor_source_plan_invalid"),
+            _safe_reference(value["tag"], "executor_source_plan_invalid"),
             manifest[0],
             main[0],
             _positive_int(value["projectionGeneration"], "executor_source_plan_invalid"),
@@ -1420,6 +1422,7 @@ def execute_one(
             expected_manifest_size=plan.manifest_asset.size,
             expected_main_digest=plan.main_asset.sha256,
             expected_main_size=plan.main_asset.size,
+            authority_resource_version=plan.release_tag,
             materialization_target_digest=plan.materialization_target_digest,
             policy_revision=plan.projection_generation,
             result_max_bytes=plan.result_max_bytes,

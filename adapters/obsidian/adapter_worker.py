@@ -2864,6 +2864,7 @@ def build_snapshot(
     native_locale_components: (
         LocaleComponents | dict[str, tuple[str, bytes]] | None
     ) = None,
+    authority_resource_version: str | None = None,
 ) -> bytes:
     manifest = _decode_manifest(manifest_content)
     plugin_id = _manifest_value(manifest, "id")
@@ -2871,6 +2872,12 @@ def build_snapshot(
         raise AdapterContractError("plugin_manifest_id_invalid")
     plugin_name = _manifest_value(manifest, "name")
     plugin_version = _manifest_value(manifest, "version")
+    if authority_resource_version is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", authority_resource_version):
+            raise AdapterContractError("authority_resource_version_invalid")
+        public_resource_version = authority_resource_version
+    else:
+        public_resource_version = plugin_version
     description = _manifest_value(manifest, "description")
     registry_metadata = (
         _decode_registry_metadata(registry_metadata_content, plugin_id)
@@ -3114,7 +3121,7 @@ def build_snapshot(
             "resource_key": plugin_id,
             "object_kind_key": "plugin",
             "name": plugin_name,
-            "version": plugin_version,
+            "version": public_resource_version,
             "version_scheme": "semver",
             "content_digest": artifact_digest,
         },

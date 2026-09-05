@@ -55,6 +55,7 @@ def _request(components: tuple[OfflineExecutorComponent, ...]) -> bytes:
                 }
                 for component in components
             ],
+            "authority_resource_version": "0.5.70",
             "materialization_target_digest": TARGET_DIGEST,
             "policy_revision": 7,
             "protocol": PUBLIC_EXECUTOR_PROTOCOL,
@@ -70,6 +71,7 @@ def _task(receipt: dict[str, object]) -> OfflineExecutorTask:
         expected_manifest_size=len(MANIFEST),
         expected_main_digest=sha256(MAIN).hexdigest(),
         expected_main_size=len(MAIN),
+        authority_resource_version="0.5.70",
         materialization_target_digest=TARGET_DIGEST,
         policy_revision=7,
         result_max_bytes=8 * 1024 * 1024,
@@ -120,6 +122,7 @@ class PublicBoundaryTests(unittest.TestCase):
                 "revision": 1,
             },
         )
+        self.assertEqual(result["source_catalog"]["resource"]["version"], "0.5.70")
         self.assertNotIn(MAIN, first.read_bytes())
         self.assertNotIn(base64.b64encode(MAIN), completed.stdout)
 
