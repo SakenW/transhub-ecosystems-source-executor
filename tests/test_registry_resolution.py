@@ -576,6 +576,34 @@ class RegistryResolutionTests(unittest.TestCase):
         self.assertEqual(len(failure_control.failure_commands), 2)
         self.assertEqual(len(set(failure_control.failure_commands)), 1)
 
+    def test_projection_conflict_is_retryable_not_a_validator_rejection(self) -> None:
+        class ProjectionConflictControl(_RegistryControl):
+            def registry_resolution_result(
+                self,
+                token: str,
+                claim: RegistryResolutionClaim,
+                result: RegistryResolutionResult,
+                command_id: str,
+            ) -> None:
+                super().registry_resolution_result(token, claim, result, command_id)
+                raise ExecutorError(
+                    "executor_control_request_failed",
+                    http_status=409,
+                )
+
+        control = ProjectionConflictControl(_claim(self.profile))
+        with self.assertRaisesRegex(
+            ExecutorError,
+            "executor_control_request_failed",
+        ):
+            execute_registry_resolution_one(
+                tokens=_Tokens(),
+                control=control,
+                github=_Github(self.profile, self.present_body),
+                profile=self.profile,
+            )
+        self.assertEqual(control.failures[0][0], "registry_resolution_retryable")
+
     def test_release_assets_without_github_digest_are_hashed_in_memory(self) -> None:
         github = _Github(self.profile, self.present_body)
         release = github.values["/repos/plugin-owner/example-repo/releases/latest"]

@@ -8,15 +8,16 @@ ROOT = Path(__file__).parents[1]
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_workflow_is_manual_protected_and_non_persistent(self) -> None:
+    def test_workflow_is_protected_periodic_and_non_persistent(self) -> None:
         workflow = (
             ROOT / ".github" / "workflows" / "public-discovery-executor.yml"
         ).read_text(encoding="utf-8")
         lowered = workflow.lower()
 
         self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("schedule:", workflow)
+        self.assertIn('cron: "7-59/5 * * * *"', workflow)
         for forbidden_trigger in (
-            "schedule:",
             "push:",
             "pull_request:",
             "repository_dispatch:",
@@ -25,6 +26,8 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertNotIn(forbidden_trigger, workflow)
         self.assertIn("contents: read", workflow)
         self.assertIn("id-token: write", workflow)
+        self.assertIn("group: public-discovery-executor", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("github.ref_protected != true", workflow)
         self.assertIn("github.event.repository.default_branch", workflow)
         self.assertGreaterEqual(workflow.count("github.ref_protected == true"), 4)

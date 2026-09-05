@@ -21,8 +21,9 @@ workflow accepts only two repository variables:
 - `TRANSHUB_PUBLIC_DISCOVERY_API_BASE`: the HTTPS control-plane base.
 - `TRANSHUB_PUBLIC_DISCOVERY_OIDC_AUDIENCE`: the dedicated OIDC audience.
 
-No GitHub secret, cache, workflow artifact, schedule, repository dispatch, or
-caller-provided URL is used. Stage A selects only the version-controlled
+No GitHub secret, cache, workflow artifact, repository dispatch, or
+caller-provided URL is used. A protected default-branch schedule runs one fair
+cycle every five minutes, alongside manual dispatch. Stage A selects only the version-controlled
 `official-directory` profile. That profile fixes GitHub REST API version
 `2026-03-10`, repository ID `262342594`, owner ID `65011256`,
 `obsidianmd/obsidian-releases`, branch `master`, and

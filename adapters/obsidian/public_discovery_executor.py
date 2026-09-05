@@ -846,7 +846,11 @@ class HttpControlPlane:
                 body = response.read(_MAX_CONTROL_BYTES + 1)
         except HTTPError as exc:
             retryable = exc.code in {408, 425, 429, 500, 502, 503, 504}
-            raise ExecutorError("executor_control_request_failed", retryable=retryable) from None
+            raise ExecutorError(
+                "executor_control_request_failed",
+                retryable=retryable,
+                http_status=exc.code,
+            ) from None
         except (OSError, URLError):
             raise ExecutorError("executor_control_request_failed", retryable=True) from None
         if len(body) > _MAX_CONTROL_BYTES or status not in {200, 201, 204}:
@@ -993,7 +997,9 @@ def execute_registry_resolution_one(
         return "registry_resolution_" + result.status
     except ExecutorError as exc:
         failure_code = _registry_resolution_failure_code(
-            exc.code, retryable=exc.retryable
+            exc.code,
+            retryable=exc.retryable,
+            http_status=exc.http_status,
         )
         # A profile-change receipt must name the currently approved profile,
         # not the stale one embedded in the leased job.  The database uses
@@ -1353,8 +1359,13 @@ def _latest_release_identity(
     return release_id, tag, tuple(selected)
 
 
-def _registry_resolution_failure_code(code: str, *, retryable: bool) -> str:
-    if retryable:
+def _registry_resolution_failure_code(
+    code: str,
+    *,
+    retryable: bool,
+    http_status: int | None = None,
+) -> str:
+    if retryable or http_status == 409:
         return "registry_resolution_retryable"
     if "profile" in code or "binding" in code:
         return "registry_profile_changed"

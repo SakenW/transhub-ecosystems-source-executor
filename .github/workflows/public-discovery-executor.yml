@@ -1,11 +1,19 @@
 name: Public discovery executor
 
 on:
+  schedule:
+    # Offset from the top of the hour, where scheduled Actions are more likely
+    # to be delayed. A run only claims work that already exists on the server.
+    - cron: "7-59/5 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: public-discovery-executor
+  cancel-in-progress: false
 
 jobs:
   guard-and-execute:
