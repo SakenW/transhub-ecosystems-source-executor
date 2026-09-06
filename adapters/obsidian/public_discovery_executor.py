@@ -1577,7 +1577,8 @@ def _read_pinned_license_evidence(
     ):
         raise ExecutorError("executor_license_evidence_invalid")
     try:
-        raw_license = base64.b64decode(content.encode("ascii"), validate=True)
+        encoded = content.replace("\r", "").replace("\n", "").encode("ascii")
+        raw_license = base64.b64decode(encoded, validate=True)
     except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
         raise ExecutorError("executor_license_evidence_invalid") from exc
     if not raw_license or len(raw_license) > _MAX_LICENSE_BYTES:

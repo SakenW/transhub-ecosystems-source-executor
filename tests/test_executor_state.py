@@ -182,6 +182,22 @@ class _Control:
 
 
 class ExecutorStateTests(unittest.TestCase):
+    def test_license_base64_line_wrapping_preserves_digest(self) -> None:
+        import base64
+
+        raw = b"MIT License\n" * 20
+        metadata = _LicenseMetadata()
+        metadata.json_object = lambda _path: {
+            "path": "LICENSE.txt",
+            "encoding": "base64",
+            "content": base64.encodebytes(raw).decode("ascii"),
+            "license": {"spdx_id": "MIT"},
+        }
+        evidence = public_discovery_executor._read_pinned_license_evidence(
+            metadata, _plan()
+        )
+        self.assertEqual(evidence.digest, sha256(raw).hexdigest())
+
     def _config(self, root: Path) -> ExecutorConfig:
         artifact = root / "executor.pyz"
         artifact.write_bytes(b"executor")
