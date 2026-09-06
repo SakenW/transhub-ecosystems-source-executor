@@ -8,6 +8,8 @@ source digest, or source bytes, and its diagnostics are bounded error codes.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -37,12 +39,14 @@ _SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_REFERENCE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+=:/-]{0,511}$")
 _SAFE_NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+@() -]{0,254}$")
 _PLUGIN_ID: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SPDX_IDENTIFIER: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]{0,159}$")
 _RESULT_MEDIA_TYPE: Final = "application/vnd.trans-hub.public-discovery-result+json"
 _GITHUB_API_ORIGIN: Final = "https://api.github.com"
 _GITHUB_RELEASE_API_VERSION: Final = "2022-11-28"
 _GITHUB_REGISTRY_API_VERSION: Final = "2026-03-10"
 _MAX_CONTROL_BYTES: Final = 1024 * 1024
 _MAX_GITHUB_METADATA_BYTES: Final = 8 * 1024 * 1024
+_MAX_LICENSE_BYTES: Final = 1024 * 1024
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _OFFICIAL_DIRECTORY_PROFILE_PATH: Final = Path(__file__).with_name(
     "official-directory-profile.json"
@@ -124,6 +128,7 @@ class SourcePlan:
     repository_name: str
     release_id: int
     release_tag: str
+    release_commit_sha: str
     manifest_asset: Asset
     main_asset: Asset
     projection_generation: int
@@ -135,6 +140,16 @@ class SourcePlan:
     result_media_type: str
     result_max_bytes: int
     materialization_target_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class LicenseEvidence:
+    """Exact public-license proof obtained at the release's pinned commit."""
+
+    identifier: str
+    digest: str
+    uri: str
+    immutable_revision: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -738,6 +753,7 @@ class HttpControlPlane:
             repository_name,
             _positive_int(value["releaseId"], "executor_source_plan_invalid"),
             _safe_reference(value["tag"], "executor_source_plan_invalid"),
+            _sha1_digest(value["commitSha"], "executor_source_plan_invalid"),
             manifest[0],
             main[0],
             _positive_int(value["projectionGeneration"], "executor_source_plan_invalid"),
@@ -1399,6 +1415,7 @@ def execute_one(
     config: ExecutorConfig,
     tokens: TokenProvider,
     control: ControlPlane,
+    metadata: GitHubMetadataReader,
     source: SourceReader,
     uploader: ResultUploader,
     host_factory: Callable[[Path], OfflineExecutorHost] = lambda artifact: OfflineExecutorHost(
@@ -1433,9 +1450,13 @@ def execute_one(
                 _read_component(source, plan, "manifest", plan.manifest_asset),
                 _read_component(source, plan, "main", plan.main_asset),
             )
-            result = host_factory(config.artifact).prepare_result(components, task)
-            if not isinstance(result, bytes):
+            offline_result = host_factory(config.artifact).prepare_result(components, task)
+            if not isinstance(offline_result, bytes):
                 raise ExecutorError("executor_result_type_invalid")
+            evidence = _read_pinned_license_evidence(metadata, plan)
+            result = _attach_license_evidence(offline_result, evidence)
+            if len(result) > plan.result_max_bytes:
+                raise ExecutorError("executor_result_size_invalid")
             return result
 
         result = _retry(prepare)
@@ -1503,6 +1524,7 @@ def execute_fair_cycle(
         config=config,
         tokens=tokens,
         control=control,
+        metadata=github,
         source=source,
         uploader=uploader,
         host_factory=host_factory,
@@ -1515,6 +1537,109 @@ def execute_fair_cycle(
     ):
         return "executor_no_job"
     return registry_outcome + ";" + source_outcome
+
+
+def _read_pinned_license_evidence(
+    metadata: GitHubMetadataReader, plan: SourcePlan
+) -> LicenseEvidence:
+    """Read GitHub's license document at the exact frozen source commit.
+
+    The parser continues to receive only the two release components.  This
+    metadata proof is separately fetched from GitHub's commit-pinned license
+    endpoint, reduced to an SPDX identifier plus a content digest, and never
+    retained or uploaded as source text.
+    """
+
+    path = (
+        "/repos/"
+        + quote(plan.owner_login, safe="")
+        + "/"
+        + quote(plan.repository_name, safe="")
+        + "/license?"
+        + urlencode({"ref": plan.release_commit_sha})
+    )
+    value = metadata.json_object(path)
+    license_value = value.get("license")
+    identifier = (
+        license_value.get("spdx_id") if isinstance(license_value, dict) else None
+    )
+    content = value.get("content")
+    encoding = value.get("encoding")
+    license_path = value.get("path")
+    if (
+        not isinstance(identifier, str)
+        or _SPDX_IDENTIFIER.fullmatch(identifier) is None
+        or identifier == "NOASSERTION"
+        or not isinstance(content, str)
+        or encoding != "base64"
+        or not isinstance(license_path, str)
+        or not _safe_repository_path(license_path)
+    ):
+        raise ExecutorError("executor_license_evidence_invalid")
+    try:
+        raw_license = base64.b64decode(content.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise ExecutorError("executor_license_evidence_invalid") from exc
+    if not raw_license or len(raw_license) > _MAX_LICENSE_BYTES:
+        raise ExecutorError("executor_license_evidence_invalid")
+    uri = (
+        "https://raw.githubusercontent.com/"
+        + quote(plan.owner_login, safe="")
+        + "/"
+        + quote(plan.repository_name, safe="")
+        + "/"
+        + plan.release_commit_sha
+        + "/"
+        + "/".join(quote(segment, safe="") for segment in license_path.split("/"))
+    )
+    return LicenseEvidence(
+        identifier=identifier,
+        digest=sha256(raw_license).hexdigest(),
+        uri=uri,
+        immutable_revision=plan.release_commit_sha,
+    )
+
+
+def _attach_license_evidence(result: bytes, evidence: LicenseEvidence) -> bytes:
+    """Upgrade the offline catalog envelope without exposing source bytes."""
+
+    value = _strict_json_value(result, "executor_result_type_invalid")
+    if not isinstance(value, dict) or set(value) != {"result", "source_catalog"}:
+        raise ExecutorError("executor_result_type_invalid")
+    binding = value.get("result")
+    if (
+        not isinstance(binding, dict)
+        or binding.get("protocol") != "trans-hub.public-discovery-result"
+        or binding.get("revision") != 1
+    ):
+        raise ExecutorError("executor_result_type_invalid")
+    upgraded_binding = dict(binding)
+    upgraded_binding["revision"] = 2
+    return _canonical_json(
+        {
+            "license_evidence": {
+                "immutable_source_revision": evidence.immutable_revision,
+                "license_digest": evidence.digest,
+                "license_identifier": evidence.identifier,
+                "license_evidence_uri": evidence.uri,
+            },
+            "result": upgraded_binding,
+            "source_catalog": value["source_catalog"],
+        }
+    )
+
+
+def _safe_repository_path(value: str) -> bool:
+    return bool(
+        value
+        and len(value) <= 512
+        and "\\" not in value
+        and all(
+            segment not in {"", ".", ".."}
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,239}", segment)
+            for segment in value.split("/")
+        )
+    )
 
 
 def _retry(operation: Callable[[], "_T"], attempts: int = 3) -> "_T":
@@ -1566,7 +1691,7 @@ _T = TypeVar("_T")
 def _failure_code(code: str, *, retryable: bool) -> str:
     if retryable:
         return "executor_workflow_failed"
-    if "source" in code or "component" in code:
+    if "source" in code or "component" in code or "license" in code:
         return "source_validation_rejected"
     if "profile" in code or "binding" in code:
         return "registry_projection_changed"

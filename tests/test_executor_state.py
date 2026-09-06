@@ -35,6 +35,7 @@ def _plan() -> SourcePlan:
         "official-plugin",
         3,
         "0.5.70",
+        "bb" * 20,
         Asset(4, "manifest.json", len(manifest), sha256(manifest).hexdigest()),
         Asset(5, "main.js", len(main), sha256(main).hexdigest()),
         6,
@@ -81,6 +82,25 @@ class _Source:
         return (b"manifest",) if asset.name == "manifest.json" else (b"main",)
 
 
+class _LicenseMetadata:
+    def json_object(self, path: str) -> dict[str, object]:
+        self.path = path
+        return {
+            "path": "LICENSE.txt",
+            "encoding": "base64",
+            "content": "TUlUIExpY2Vuc2U=",
+            "license": {"spdx_id": "MIT"},
+        }
+
+    def raw_bytes(self, _path: str, _limit: int) -> bytes:
+        raise AssertionError("license proof must use the commit-pinned API payload")
+
+    def release_asset_digest(
+        self, _owner_login: str, _repository_name: str, _asset: Asset
+    ) -> str:
+        raise AssertionError("not used by execute_one")
+
+
 class _Host:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
@@ -89,7 +109,18 @@ class _Host:
         self.assert_components = components
         if self.error:
             raise self.error
-        return b"{}"
+        return json.dumps(
+            {
+                "result": {
+                    "materialization_target_digest": "ff" * 32,
+                    "protocol": "trans-hub.public-discovery-result",
+                    "revision": 1,
+                },
+                "source_catalog": {},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
 
 
 class _Uploader:
@@ -108,6 +139,7 @@ class _Control:
         self.confirm_calls = 0
         self.status_calls = 0
         self.failures: list[str] = []
+        self.results: list[bytes] = []
 
     def claim(self, _token: str) -> Claim:
         return _claim()
@@ -123,6 +155,7 @@ class _Control:
         _result: bytes,
         command_id: str,
     ) -> UploadGrant:
+        self.results.append(_result)
         self.grant_commands.append(command_id)
         if len(self.grant_commands) == 1:
             raise ExecutorError("executor_control_request_failed", retryable=True)
@@ -165,6 +198,7 @@ class ExecutorStateTests(unittest.TestCase):
                 config=self._config(Path(temporary)),
                 tokens=_Tokens(),
                 control=control,
+                metadata=_LicenseMetadata(),
                 source=source,
                 uploader=uploader,
                 host_factory=lambda _artifact: _Host(),  # type: ignore[arg-type,return-value]
@@ -177,6 +211,12 @@ class ExecutorStateTests(unittest.TestCase):
         self.assertEqual(control.confirm_calls, 3)
         self.assertEqual(control.status_calls, 1)
         self.assertEqual(control.failures, [])
+        result = json.loads(control.results[-1])
+        self.assertEqual(result["result"]["revision"], 2)
+        self.assertEqual(result["license_evidence"]["license_identifier"], "MIT")
+        self.assertEqual(
+            result["license_evidence"]["immutable_source_revision"], "bb" * 20
+        )
 
     def test_adapter_failure_is_closed_before_any_upload(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -187,6 +227,7 @@ class ExecutorStateTests(unittest.TestCase):
                     config=self._config(Path(temporary)),
                     tokens=_Tokens(),
                     control=control,
+                    metadata=_LicenseMetadata(),
                     source=_Source(),
                     uploader=uploader,
                     host_factory=lambda _artifact: _Host(
