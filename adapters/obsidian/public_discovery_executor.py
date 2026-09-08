@@ -532,8 +532,12 @@ class HttpGitHubMetadataReader:
                 ):
                     raise ExecutorError("registry_github_response_invalid", retryable=True)
                 body = cast(bytes, response.read(limit + 1))
-        except HTTPError:
-            raise ExecutorError("registry_github_request_failed", retryable=True) from None
+        except HTTPError as exc:
+            http_status = exc.code
+            exc.close()
+            raise ExecutorError(
+                "registry_github_request_failed", retryable=True, http_status=http_status
+            ) from None
         except (OSError, URLError):
             raise ExecutorError("registry_github_request_failed", retryable=True) from None
         if len(body) > limit:
@@ -1558,7 +1562,12 @@ def _read_pinned_license_evidence(
         + "/license?"
         + urlencode({"ref": plan.release_commit_sha})
     )
-    value = metadata.json_object(path)
+    try:
+        value = metadata.json_object(path)
+    except ExecutorError as exc:
+        if exc.code == "registry_github_request_failed" and exc.http_status == 404:
+            raise ExecutorError("executor_license_evidence_missing") from None
+        raise
     license_value = value.get("license")
     identifier = (
         license_value.get("spdx_id") if isinstance(license_value, dict) else None

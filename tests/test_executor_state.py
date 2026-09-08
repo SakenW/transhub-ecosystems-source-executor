@@ -5,6 +5,8 @@ import unittest
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from adapters.obsidian.offline_executor_host import OfflineExecutorHostError
 from adapters.obsidian import public_discovery_executor
@@ -182,6 +184,63 @@ class _Control:
 
 
 class ExecutorStateTests(unittest.TestCase):
+    def test_missing_license_closes_once_without_grant_or_upload(self) -> None:
+        control, source, uploader = _Control(), _Source(), _Uploader()
+        reader = public_discovery_executor.HttpGitHubMetadataReader("test-token")
+        with TemporaryDirectory() as temporary, patch.object(
+            public_discovery_executor, "urlopen", side_effect=HTTPError(
+                "https://api.github.com/example", 404, "not found", {}, None,
+            ),
+        ) as request:
+            with self.assertRaisesRegex(ExecutorError, "executor_license_evidence_missing"):
+                execute_one(
+                    config=self._config(Path(temporary)), tokens=_Tokens(),
+                    control=control, metadata=reader, source=source, uploader=uploader,
+                    host_factory=lambda _artifact: _Host(),
+                )
+        request.assert_called_once()
+        self.assertEqual(source.asset_names, ["manifest.json", "main.js"])
+        self.assertEqual(control.failures, ["source_validation_rejected"])
+        self.assertEqual(control.grant_commands, [])
+        self.assertEqual(uploader.calls, 0)
+
+    def test_license_not_found_is_terminal_without_leaking_transport_details(self) -> None:
+        reader = public_discovery_executor.HttpGitHubMetadataReader("test-token")
+        error = HTTPError("https://api.github.com/private-locator", 404, "private-message", {}, None)
+        with patch.object(public_discovery_executor, "urlopen", side_effect=error):
+            with self.assertRaises(ExecutorError) as raised:
+                public_discovery_executor._read_pinned_license_evidence(reader, _plan())
+        self.assertEqual(raised.exception.code, "executor_license_evidence_missing")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(str(raised.exception), "executor_license_evidence_missing")
+        self.assertEqual(public_discovery_executor._failure_code(
+            raised.exception.code, retryable=raised.exception.retryable,
+        ), "source_validation_rejected")
+
+    def test_metadata_404_outside_license_retains_registry_retry_semantics(self) -> None:
+        reader = public_discovery_executor.HttpGitHubMetadataReader("test-token")
+        with patch.object(public_discovery_executor, "urlopen", side_effect=HTTPError(
+            "https://api.github.com/example", 404, "not found", {}, None,
+        )):
+            with self.assertRaises(ExecutorError) as raised:
+                reader.json_object("/repos/example/project/releases/latest")
+        self.assertEqual(raised.exception.http_status, 404)
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.code, "registry_github_request_failed")
+
+    def test_non_404_license_errors_remain_retryable(self) -> None:
+        reader = public_discovery_executor.HttpGitHubMetadataReader("test-token")
+        for status in (403, 429, 500, 503):
+            with self.subTest(status=status), patch.object(
+                public_discovery_executor, "urlopen", side_effect=HTTPError(
+                    "https://api.github.com/example", status, "failure", {}, None,
+                ),
+            ):
+                with self.assertRaises(ExecutorError) as raised:
+                    public_discovery_executor._read_pinned_license_evidence(reader, _plan())
+            self.assertEqual(raised.exception.http_status, status)
+            self.assertTrue(raised.exception.retryable)
+
     def test_license_base64_line_wrapping_preserves_digest(self) -> None:
         import base64
 
