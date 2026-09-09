@@ -4,7 +4,7 @@ This public repository contains the auditable Obsidian source executor used by
 Trans-Hub's on-demand public discovery flow. On each manual run it first tries
 one Stage A registry-resolution job, then one existing Stage B source-discovery
 job. Stage A pins and reads the official Obsidian directory only for the claimed
-plugin, verifies the directory repository, plugin repository, latest release,
+plugin, verifies the directory repository, plugin repository, preferred stable release,
 release commit, and exact `manifest.json`/`main.js` asset metadata, and returns
 only identities and digests. Stage B reads those two server-approved release
 assets and turns the bounded component closure into a canonical source catalog.
@@ -32,8 +32,15 @@ profile digests before any network request. The directory is pinned through a
 commit and Git tree blob identity, bounded, read completely into memory, checked
 against its Git blob SHA-1 and a computed SHA-256, parsed with duplicate-key and
 duplicate-plugin rejection, and discarded before result submission. Only a
-complete pinned directory with no exact ID produces `absent`; HTTP and network
-failures remain retryable.
+complete pinned directory with no exact ID produces `absent`; transient HTTP and network
+failures remain retryable. HTTP 404 is reported as a missing resource.
+
+Release selection prefers a stable semantic version even when GitHub incorrectly
+marks a beta release as stable. If the latest release is a preview or unavailable,
+up to three pages of 100 releases are examined. A preview is used only after the
+returned history is exhausted without a stable release; reaching the search limit
+fails closed. Commit-pinned license absence and unrecognized custom licenses
+produce distinct diagnostics. Custom licenses are never implicitly approved.
 
 Stage B derives both GitHub Release asset endpoints from a frozen source plan,
 requires one unique `manifest.json` and one unique `main.js`, requires `main.js`

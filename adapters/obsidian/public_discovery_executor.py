@@ -327,6 +327,8 @@ class RegistryResolutionControlPlane(Protocol):
 
 
 class GitHubMetadataReader(Protocol):
+    def releases(self, path: str) -> list[dict[str, object]]: ...
+
     def json_object(self, path: str) -> dict[str, object]: ...
 
     def raw_bytes(self, path: str, limit: int) -> bytes: ...
@@ -497,6 +499,15 @@ class HttpGitHubMetadataReader:
             "registry_github_metadata_invalid",
         )
 
+    def releases(self, path: str) -> list[dict[str, object]]:
+        value = _strict_json_value(
+            self._request(path, "application/vnd.github+json", _MAX_GITHUB_METADATA_BYTES),
+            "registry_release_metadata_invalid",
+        )
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise ExecutorError("registry_release_metadata_invalid")
+        return cast(list[dict[str, object]], value)
+
     def raw_bytes(self, path: str, limit: int) -> bytes:
         return self._request(path, "application/vnd.github.raw+json", limit)
 
@@ -532,8 +543,13 @@ class HttpGitHubMetadataReader:
                 ):
                     raise ExecutorError("registry_github_response_invalid", retryable=True)
                 body = cast(bytes, response.read(limit + 1))
-        except HTTPError:
-            raise ExecutorError("registry_github_request_failed", retryable=True) from None
+        except HTTPError as exc:
+            if exc.code == 404:
+                raise ExecutorError("registry_github_not_found") from None
+            raise ExecutorError(
+                f"registry_github_http_{exc.code}",
+                retryable=exc.code in {403, 408, 425, 429, 500, 502, 503, 504},
+            ) from None
         except (OSError, URLError):
             raise ExecutorError("registry_github_request_failed", retryable=True) from None
         if len(body) > limit:
@@ -1119,9 +1135,7 @@ def resolve_official_directory_claim(
     repository = _plugin_repository_identity(
         plugin_repository, owner_login, repository_name
     )
-    release_value = _retry(
-        lambda: github.json_object(plugin_repository_path + "/releases/latest")
-    )
+    release_value = _select_release(github, plugin_repository_path)
     release_id, release_tag, assets = _latest_release_identity(
         release_value, profile
     )
@@ -1320,10 +1334,43 @@ def _directory_repository_reference(entry: Mapping[str, object]) -> tuple[str, s
     )
 
 
+def _is_stable_release(value: Mapping[str, object]) -> bool:
+    tag = value.get("tag_name")
+    return (value.get("draft") is False and value.get("prerelease") is False
+            and isinstance(tag, str)
+            and re.fullmatch(r"v?\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?", tag) is not None)
+
+
+def _select_release(github: GitHubMetadataReader, repository_path: str) -> dict[str, object]:
+    try:
+        latest = _retry(lambda: github.json_object(repository_path + "/releases/latest"))
+    except ExecutorError as exc:
+        if exc.code != "registry_github_not_found":
+            raise
+        latest = None
+    if latest is not None and _is_stable_release(latest):
+        return latest
+    # Search a bounded release history before considering a preview release.
+    preview = latest if latest is not None and latest.get("draft") is False else None
+    for page in range(1, 4):
+        releases = _retry(lambda: github.releases(
+            repository_path + f"/releases?per_page=100&page={page}"))
+        for release in releases:
+            if _is_stable_release(release):
+                return release
+            if preview is None and release.get("draft") is False:
+                preview = release
+        if len(releases) < 100:
+            if preview is not None:
+                return preview
+            raise ExecutorError("registry_release_metadata_invalid")
+    raise ExecutorError("registry_stable_release_search_limit")
+
+
 def _latest_release_identity(
     value: Mapping[str, object], profile: OfficialDirectoryProfile
 ) -> tuple[int, str, tuple[Asset, ...]]:
-    if value.get("draft") is not False or value.get("prerelease") is not False:
+    if value.get("draft") is not False or not isinstance(value.get("prerelease"), bool):
         raise ExecutorError("registry_release_metadata_invalid")
     release_id = _positive_int(
         value.get("id"), "registry_release_metadata_invalid"
@@ -1558,11 +1605,18 @@ def _read_pinned_license_evidence(
         + "/license?"
         + urlencode({"ref": plan.release_commit_sha})
     )
-    value = metadata.json_object(path)
+    try:
+        value = metadata.json_object(path)
+    except ExecutorError as exc:
+        if exc.code == "registry_github_not_found":
+            raise ExecutorError("executor_license_missing") from None
+        raise
     license_value = value.get("license")
     identifier = (
         license_value.get("spdx_id") if isinstance(license_value, dict) else None
     )
+    if identifier == "NOASSERTION":
+        raise ExecutorError("executor_license_review_required")
     content = value.get("content")
     encoding = value.get("encoding")
     license_path = value.get("path")
