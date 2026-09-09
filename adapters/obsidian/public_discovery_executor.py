@@ -1654,15 +1654,12 @@ def _read_pinned_license_evidence(
     identifier = (
         license_value.get("spdx_id") if isinstance(license_value, dict) else None
     )
-    if identifier == "NOASSERTION":
-        raise ExecutorError("executor_license_review_required")
     content = value.get("content")
     encoding = value.get("encoding")
     license_path = value.get("path")
     if (
         not isinstance(identifier, str)
         or _SPDX_IDENTIFIER.fullmatch(identifier) is None
-        or identifier == "NOASSERTION"
         or not isinstance(content, str)
         or encoding != "base64"
         or not isinstance(license_path, str)
@@ -1686,9 +1683,15 @@ def _read_pinned_license_evidence(
         + "/"
         + "/".join(quote(segment, safe="") for segment in license_path.split("/"))
     )
+    digest = sha256(raw_license).hexdigest()
+    # Unrecognized licenses carry evidence, never an implicit permission. A
+    # content-derived identifier lets platform policy classify the exact same
+    # license across repositories without plugin-specific exceptions.
+    if identifier == "NOASSERTION":
+        identifier = "LicenseRef-SHA256-" + digest
     return LicenseEvidence(
         identifier=identifier,
-        digest=sha256(raw_license).hexdigest(),
+        digest=digest,
         uri=uri,
         immutable_revision=plan.release_commit_sha,
     )

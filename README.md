@@ -45,7 +45,11 @@ marks a beta release as stable. If the latest release is a preview or unavailabl
 up to three pages of 100 releases are examined. A preview is used only after the
 returned history is exhausted without a stable release; reaching the search limit
 fails closed. Commit-pinned license absence and unrecognized custom licenses
-produce distinct diagnostics. Custom licenses are never implicitly approved.
+remain distinct. Unrecognized licenses carry a `LicenseRef-SHA256-<full digest>`
+identifier, the exact license digest, and a commit-pinned evidence URL so platform
+policy can classify the same license consistently across repositories. This is
+evidence collection only: unknown licenses and denied distribution remain
+blocked by platform policy. No permission is inferred from the identifier.
 
 Stage B derives both GitHub Release asset endpoints from a frozen source plan,
 requires one unique `manifest.json` and one unique `main.js`, requires `main.js`
