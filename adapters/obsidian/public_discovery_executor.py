@@ -1067,7 +1067,9 @@ def execute_registry_resolution_one(
                 + _safe_diagnostic_code(exc.code),
                 retryable=True,
             ) from None
-        raise ExecutorError(exc.code, retryable=exc.retryable) from None
+        raise ExecutorError(
+            exc.code, retryable=exc.retryable, http_status=exc.http_status
+        ) from None
 
 
 def resolve_official_directory_claim(
@@ -1132,9 +1134,11 @@ def resolve_official_directory_claim(
     plugin_repository = _retry(
         lambda: github.json_object(plugin_repository_path)
     )
-    repository = _plugin_repository_identity(
-        plugin_repository, owner_login, repository_name
+    repository = _resolve_plugin_repository_identity(
+        github, plugin_repository, owner_login, repository_name
     )
+    owner_login, repository_name = repository.owner_login, repository.repository_name
+    plugin_repository_path = _github_repository_path(owner_login, repository_name)
     release_value = _select_release(github, plugin_repository_path)
     release_id, release_tag, assets = _latest_release_identity(
         release_value, profile
@@ -1215,6 +1219,36 @@ def _validate_directory_repository(
         or value.get("disabled") is not False
     ):
         raise ExecutorError("registry_directory_identity_mismatch")
+
+
+def _resolve_plugin_repository_identity(
+    github: GitHubMetadataReader,
+    value: Mapping[str, object],
+    expected_owner: str,
+    expected_repository: str,
+) -> RepositoryIdentity:
+    try:
+        return _plugin_repository_identity(value, expected_owner, expected_repository)
+    except ExecutorError as exc:
+        if exc.code != "registry_repository_identity_mismatch":
+            raise
+    # GitHub redirects old directory paths after a transfer or rename. Confirm
+    # the canonical identity via its immutable repository ID before using it.
+    owner = value.get("owner")
+    if not isinstance(owner, dict):
+        raise ExecutorError("registry_repository_identity_invalid")
+    canonical = _plugin_repository_identity(
+        value,
+        _identifier(owner.get("login"), 39, "registry_repository_identity_invalid", extra="-"),
+        _identifier(value.get("name"), 100, "registry_repository_identity_invalid", extra="._-"),
+    )
+    confirmed = _retry(lambda: github.json_object(f"/repositories/{canonical.repository_id}"))
+    identity = _plugin_repository_identity(
+        confirmed, canonical.owner_login, canonical.repository_name
+    )
+    if identity != canonical:
+        raise ExecutorError("registry_repository_identity_mismatch")
+    return identity
 
 
 def _plugin_repository_identity(
@@ -1565,6 +1599,11 @@ def execute_fair_cycle(
             profile=profile,
         )
     except ExecutorError as exc:
+        # Stage B may also fail. Preserve Stage A diagnostics independently.
+        print(
+            "public_registry_resolution_failed:" + _safe_failure_diagnostic(exc),
+            file=sys.stderr,
+        )
         registry_error = exc
         registry_outcome = "registry_resolution_failed"
     source_outcome = execute_one(

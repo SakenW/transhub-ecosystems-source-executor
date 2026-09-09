@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from adapters.obsidian.public_discovery_executor import (
     _select_release, HttpGitHubMetadataReader, ExecutorError,
+    _resolve_plugin_repository_identity,
 )
 
 class ReleaseSelectionTests(unittest.TestCase):
@@ -42,3 +43,28 @@ class ReleaseSelectionTests(unittest.TestCase):
                 HttpGitHubMetadataReader().json_object('/repos/a/b/license')
         self.assertEqual(caught.exception.code, 'registry_github_not_found')
         self.assertFalse(caught.exception.retryable)
+
+class RepositoryTransferTests(unittest.TestCase):
+    def repository(self, **changes):
+        return dict(id=42, name="plugin", full_name="archive/plugin",
+                    owner=dict(id=7, login="archive"), private=False, **changes)
+
+    def test_transferred_repository_is_confirmed_by_immutable_id(self):
+        reader = Mock()
+        reader.json_object.return_value = self.repository()
+        result = _resolve_plugin_repository_identity(reader, self.repository(), "original", "plugin")
+        self.assertEqual((result.repository_id, result.owner_login), (42, "archive"))
+        reader.json_object.assert_called_once_with("/repositories/42")
+
+    def test_changed_identity_during_confirmation_is_rejected(self):
+        reader = Mock()
+        value = self.repository()
+        reader.json_object.return_value = dict(value, id=43)
+        with self.assertRaisesRegex(ExecutorError, "identity_mismatch"):
+            _resolve_plugin_repository_identity(reader, value, "original", "plugin")
+
+    def test_private_redirect_is_rejected_without_further_requests(self):
+        reader = Mock()
+        with self.assertRaisesRegex(ExecutorError, "identity_mismatch"):
+            _resolve_plugin_repository_identity(reader, dict(self.repository(), private=True), "original", "plugin")
+        reader.json_object.assert_not_called()

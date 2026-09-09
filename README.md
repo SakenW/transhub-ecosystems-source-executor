@@ -1,7 +1,7 @@
 # Trans-Hub Ecosystems Source Executor
 
 This public repository contains the auditable Obsidian source executor used by
-Trans-Hub's on-demand public discovery flow. On each manual run it first tries
+Trans-Hub's on-demand public discovery flow. On each scheduled or manual run it first tries
 one Stage A registry-resolution job, then one existing Stage B source-discovery
 job. Stage A pins and reads the official Obsidian directory only for the claimed
 plugin, verifies the directory repository, plugin repository, preferred stable release,
@@ -13,7 +13,7 @@ plugin JavaScript, or publish raw plugin files.
 
 ## Security boundary
 
-The GitHub-hosted workflow is manual-only and fails closed unless it runs from
+The GitHub-hosted workflow fails closed unless it runs from
 the repository's protected default branch. It has only read-only repository
 access and OIDC token issuance. Checkout does not persist credentials. The
 workflow accepts only two repository variables:
@@ -34,6 +34,11 @@ against its Git blob SHA-1 and a computed SHA-256, parsed with duplicate-key and
 duplicate-plugin rejection, and discarded before result submission. Only a
 complete pinned directory with no exact ID produces `absent`; transient HTTP and network
 failures remain retryable. HTTP 404 is reported as a missing resource.
+
+Repository transfers and renames are resolved through GitHub metadata and
+confirmed against the immutable repository ID; all subsequent release and
+license requests use the confirmed canonical repository. Identity drift and
+private repositories remain rejected.
 
 Release selection prefers a stable semantic version even when GitHub incorrectly
 marks a beta release as stable. If the latest release is a preview or unavailable,
@@ -96,8 +101,10 @@ require Docker.
 - Any registry/repository/release/profile identity, digest, size,
   missing/duplicate component, manifest, catalog, lease binding, upload
   confirmation, or protected-ref mismatch fails closed with a bounded code. A
-  Release missing either `manifest.json` or `main.js`, or missing either
-  GitHub-provided SHA-256 asset digest, is rejected before Stage B is created.
+  Release missing either `manifest.json` or `main.js` is rejected before Stage B
+  is created. Stage A hashes bounded asset bytes and verifies their declared
+  sizes, including older assets without GitHub-provided digests; Stage B
+  verifies those frozen hashes again.
 - Transient network operations retry at most three times. Grant retries reuse
   one command ID; ambiguous confirmation is accepted only after a status read
   proves the task reached `materialization_pending`.
@@ -105,6 +112,8 @@ require Docker.
   the directory contains only the staged executor artifact, never source
   components. Lease fences and server-side task state remain the concurrency
   authority.
+- Stage A failures emit a bounded, sanitized diagnostic before Stage B runs,
+  so a second failure cannot hide the first one.
 - The workflow does not mutate this repository and stores no cache or artifact.
   A healthy run fairly tries one Stage A claim before one Stage B claim and
   emits `executor_no_job` when both queues are empty. A failed run leaves no

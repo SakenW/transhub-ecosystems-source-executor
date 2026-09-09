@@ -754,6 +754,30 @@ class RegistryResolutionTests(unittest.TestCase):
         self.assertEqual(events, ["stage-a", "stage-b"])
         self.assertEqual(control.failures[0][0], "registry_profile_changed")
 
+    def test_both_stage_failures_preserve_safe_registry_diagnostic(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        for code, expected in [
+            ("registry_release_assets_invalid", "registry_release_assets_invalid:http_422"),
+            ("secret=https://example.test/token", "unknown:http_422"),
+        ]:
+            with self.subTest(code=code):
+                output = io.StringIO()
+                with patch(
+                    "adapters.obsidian.public_discovery_executor.execute_registry_resolution_one",
+                    side_effect=ExecutorError(code, http_status=422),
+                ), patch(
+                    "adapters.obsidian.public_discovery_executor.execute_one",
+                    side_effect=ExecutorError("executor_license_review_required"),
+                ), redirect_stderr(output):
+                    with self.assertRaisesRegex(ExecutorError, "executor_license_review_required"):
+                        execute_fair_cycle(
+                            config=None, tokens=None, control=None, github=None,
+                            profile=self.profile, source=None, uploader=None,
+                        )
+                self.assertEqual(output.getvalue(), "public_registry_resolution_failed:" + expected + "\n")
+
     def test_http_control_plane_uses_registry_resolution_wire_contract(self) -> None:
         client = HttpControlPlane("https://api.example.test")
         captured: list[tuple[str, str, object | None]] = []
