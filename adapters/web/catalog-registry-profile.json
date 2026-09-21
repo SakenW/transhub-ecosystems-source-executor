@@ -1,0 +1,14 @@
+{
+  "apiVersion": "2026-03-10",
+  "catalogRepository": {
+    "defaultBranch": "main",
+    "ownerId": 16665726,
+    "ownerLogin": "SakenW",
+    "repositoryId": 1378958674,
+    "repositoryName": "transhub-web-site-catalogs"
+  },
+  "maxCatalogBytes": 16777216,
+  "provider": "github-rest",
+  "registryKey": "web-site-catalog",
+  "schema": "trans-hub.web-catalog-registry-profile.v1"
+}
