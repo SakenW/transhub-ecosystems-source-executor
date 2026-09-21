@@ -110,6 +110,8 @@ class Claim:
     source_reference: str
     adapter_build_digest: str
     lease_fence: int
+    registry_key: str = ""
+    external_object_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,7 +685,11 @@ class HttpControlPlane:
         source_reference = _safe_reference(value["sourceReference"], "executor_claim_invalid")
         digest = _digest(value["adapterBuildDigest"], "executor_claim_invalid")
         fence = _positive_int(value["leaseFence"], "executor_claim_invalid")
-        return Claim(task_id, source_reference, digest, fence)
+        registry_key = _safe_reference(value["registryKey"], "executor_claim_invalid")
+        external_object_id = _safe_reference(
+            value["externalObjectId"], "executor_claim_invalid"
+        )
+        return Claim(task_id, source_reference, digest, fence, registry_key, external_object_id)
 
     def source_plan(self, token: str, claim: Claim) -> SourcePlan:
         _, body = self._request(
@@ -1511,7 +1517,7 @@ def execute_one(
     claim = control.claim(claim_token)
     if claim is None:
         return "executor_no_task"
-    if claim.source_reference.startswith("web-site-catalog/"):
+    if claim.registry_key == "web-site-catalog":
         if not isinstance(control, HttpControlPlane):
             raise ExecutorError("web_catalog_control_plane_unavailable")
         # Keep Web catalog handling at the external adapter boundary.  The

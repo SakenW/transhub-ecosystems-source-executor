@@ -42,7 +42,7 @@ _SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST: Final = re.compile(r"^[0-9a-f]{64}$")
 _MAX_CATALOG_BYTES: Final = 16 * 1024 * 1024
 _RESULT_MEDIA_TYPE: Final = "application/vnd.trans-hub.public-discovery-result+json"
-_RESULT_SCHEMA: Final = "canonical-json-v1"
+_RESULT_SCHEMA: Final = "public-discovery/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +289,7 @@ def execute_web_catalog_claim(
     """Complete an already leased Web catalog task without re-claiming work."""
 
     try:
-        site_key = _site_key_from_reference(claim.source_reference)
+        site_key = _site_key_from_claim(claim)
         plan = control.source_plan(tokens.token(), claim)
         catalog = _load_catalog(source, plan, site_key)
         evidence = _read_pinned_license_evidence(metadata, plan)
@@ -328,11 +328,13 @@ def execute_web_catalog_claim(
         raise
 
 
-def _site_key_from_reference(value: str) -> str:
-    match = re.fullmatch(r"web-site-catalog/([a-z0-9][a-z0-9-]{0,63})", value)
-    if match is None:
+def _site_key_from_claim(claim: Claim) -> str:
+    if (
+        claim.registry_key != "web-site-catalog"
+        or _SITE_KEY.fullmatch(claim.external_object_id) is None
+    ):
         raise ExecutorError("web_catalog_source_reference_invalid")
-    return match.group(1)
+    return claim.external_object_id
 
 
 def _load_catalog(source: SourceReader, plan: WebCatalogPlan, site_key: str) -> dict[str, object]:

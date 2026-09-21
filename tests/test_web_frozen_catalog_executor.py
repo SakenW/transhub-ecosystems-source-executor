@@ -83,7 +83,7 @@ def _source_plan_payload(content: bytes) -> dict[str, object]:
         "sourcePlanDigest": "dd" * 32,
         "adapterBuildDigest": "ee" * 32,
         "adapterProfileDigest": "ff" * 32,
-        "resultSchema": "canonical-json-v1",
+        "resultSchema": "public-discovery/v1",
         "resultMediaType": "application/vnd.trans-hub.public-discovery-result+json",
         "resultMaxBytes": 1024 * 1024,
         "materializationTargetDigest": "11" * 32,
@@ -117,7 +117,7 @@ class _Control:
         self.failures: list[tuple[str, str]] = []
 
     def claim(self, _token: str) -> Claim:
-        return Claim("11111111-1111-4111-8111-111111111111", "web-site-catalog/figma", "ee" * 32, 7)
+        return Claim("11111111-1111-4111-8111-111111111111", "registry/opaque", "ee" * 32, 7, "web-site-catalog", "figma")
 
     def source_plan(self, _token: str, _claim: Claim) -> WebCatalogPlan:
         return self.plan
@@ -225,7 +225,7 @@ class WebFrozenCatalogExecutorTests(unittest.TestCase):
             "sourcePlanDigest": "dd" * 32,
             "adapterBuildDigest": "ee" * 32,
             "adapterProfileDigest": "ff" * 32,
-            "resultSchema": "canonical-json-v1",
+            "resultSchema": "public-discovery/v1",
             "resultMediaType": "application/vnd.trans-hub.public-discovery-result+json",
             "resultMaxBytes": 1024,
             "materializationTargetDigest": "11" * 32,
