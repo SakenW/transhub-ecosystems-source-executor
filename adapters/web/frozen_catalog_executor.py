@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
+from pathlib import Path
 from typing import Final, Protocol, cast
 from uuid import uuid4
 
@@ -26,12 +27,24 @@ from adapters.obsidian.public_discovery_executor import (
     TokenProvider,
     UploadGrant,
     HttpControlPlane,
+    RegistryResolutionClaim,
+    RegistryResolutionResult,
+    RegistrySnapshot,
+    ReleaseIdentity,
+    RegistryResolutionControlPlane,
     _strict_json_value,
     _attach_license_evidence,
     _canonical_json,
     _failure_code,
     _read_pinned_license_evidence,
     _retry,
+    _commit_identity,
+    _commit_revision,
+    _github_repository_path,
+    _plugin_repository_identity,
+    _select_release,
+    _registry_resolution_failure_code,
+    _registry_resolution_failure_evidence,
 )
 
 _CATALOG_ASSET_NAME: Final = re.compile(
@@ -43,6 +56,7 @@ _DIGEST: Final = re.compile(r"^[0-9a-f]{64}$")
 _MAX_CATALOG_BYTES: Final = 16 * 1024 * 1024
 _RESULT_MEDIA_TYPE: Final = "application/vnd.trans-hub.public-discovery-result+json"
 _RESULT_SCHEMA: Final = "public-discovery/v1"
+_PROFILE_PATH: Final = Path(__file__).with_name("catalog-registry-profile.json")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +80,121 @@ class WebCatalogPlan:
     result_media_type: str
     result_max_bytes: int
     materialization_target_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class WebCatalogRegistryProfile:
+    registry_key: str
+    owner_id: int
+    owner_login: str
+    repository_id: int
+    repository_name: str
+    default_branch: str
+    max_catalog_bytes: int
+    authority_digest: str
+    profile_digest: str
+
+
+def load_web_catalog_registry_profile(
+    path: Path = _PROFILE_PATH,
+) -> WebCatalogRegistryProfile:
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExecutorError("web_catalog_registry_profile_invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "apiVersion", "catalogRepository", "maxCatalogBytes", "provider", "registryKey", "schema"
+    }:
+        raise ExecutorError("web_catalog_registry_profile_invalid")
+    repository = value["catalogRepository"]
+    if not isinstance(repository, dict) or set(repository) != {
+        "defaultBranch", "ownerId", "ownerLogin", "repositoryId", "repositoryName"
+    }:
+        raise ExecutorError("web_catalog_registry_profile_invalid")
+    if (
+        value["schema"] != "trans-hub.web-catalog-registry-profile.v1"
+        or value["registryKey"] != "web-site-catalog"
+        or value["provider"] != "github-rest"
+        or value["apiVersion"] != "2026-03-10"
+        or repository["ownerId"] != 16665726
+        or repository["ownerLogin"] != "SakenW"
+        or repository["repositoryId"] != 1378958674
+        or repository["repositoryName"] != "transhub-web-site-catalogs"
+        or repository["defaultBranch"] != "main"
+        or value["maxCatalogBytes"] != _MAX_CATALOG_BYTES
+    ):
+        raise ExecutorError("web_catalog_registry_profile_invalid")
+    authority = {
+        "provider": value["provider"], "repositoryId": repository["repositoryId"],
+        "ownerId": repository["ownerId"], "ownerLogin": repository["ownerLogin"],
+        "repositoryName": repository["repositoryName"], "defaultBranch": repository["defaultBranch"],
+    }
+    return WebCatalogRegistryProfile(
+        registry_key="web-site-catalog", owner_id=16665726, owner_login="SakenW",
+        repository_id=1378958674, repository_name="transhub-web-site-catalogs",
+        default_branch="main", max_catalog_bytes=_MAX_CATALOG_BYTES,
+        authority_digest=sha256(_canonical_json(authority)).hexdigest(),
+        profile_digest=sha256(_canonical_json(value)).hexdigest(),
+    )
+
+
+def resolve_web_catalog_registry_claim(
+    claim: RegistryResolutionClaim, profile: WebCatalogRegistryProfile, github: GitHubMetadataReader
+) -> RegistryResolutionResult:
+    if (
+        claim.registry_key != profile.registry_key
+        or claim.registry_authority_digest != profile.authority_digest
+        or claim.validator_profile_digest != profile.profile_digest
+        or _SITE_KEY.fullmatch(claim.external_object_id) is None
+    ):
+        raise ExecutorError("web_catalog_registry_profile_binding_changed")
+    repository_path = _github_repository_path(profile.owner_login, profile.repository_name)
+    repository_value = _retry(lambda: github.json_object(repository_path))
+    repository = _plugin_repository_identity(repository_value, profile.owner_login, profile.repository_name)
+    if (
+        repository.repository_id != profile.repository_id or repository.owner_id != profile.owner_id
+        or repository_value.get("default_branch") != profile.default_branch
+        or repository_value.get("archived") is not False or repository_value.get("disabled") is not False
+    ):
+        raise ExecutorError("web_catalog_registry_repository_identity_invalid")
+    commit_value = _retry(lambda: github.json_object(repository_path + "/commits/" + profile.default_branch))
+    commit_sha, _ = _commit_identity(commit_value)
+    registry = RegistrySnapshot(_commit_revision(commit_value, commit_sha), commit_sha, sha256(_canonical_json({"repositoryId": repository.repository_id, "commitSha": commit_sha})).hexdigest())
+    release_value = _select_release(github, repository_path)
+    assets = release_value.get("assets")
+    expected_name = claim.external_object_id + ".canonical-source-catalog.json"
+    matches = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") == expected_name] if isinstance(assets, list) else []
+    if len(matches) != 1:
+        return RegistryResolutionResult("absent", registry, None, None, None, ())
+    asset_value = matches[0]
+    asset = Asset(int(asset_value["id"]), expected_name, int(asset_value["size"]), None)
+    if not 1 <= asset.size <= profile.max_catalog_bytes or asset_value.get("state") != "uploaded":
+        raise ExecutorError("web_catalog_registry_asset_invalid")
+    asset = Asset(asset.asset_id, asset.name, asset.size, _retry(lambda: github.release_asset_digest(repository.owner_login, repository.repository_name, asset)))
+    tag = release_value.get("tag_name")
+    release_id = release_value.get("id")
+    if not isinstance(tag, str) or not isinstance(release_id, int) or release_id < 1:
+        raise ExecutorError("web_catalog_registry_release_invalid")
+    release_commit_value = _retry(lambda: github.json_object(repository_path + "/commits/" + tag))
+    release_commit_sha, _ = _commit_identity(release_commit_value)
+    entry_digest = sha256(_canonical_json({"siteKey": claim.external_object_id, "assetDigest": asset.sha256, "releaseId": release_id})).hexdigest()
+    return RegistryResolutionResult("present", registry, entry_digest, repository, ReleaseIdentity(release_id, tag, release_commit_sha), (asset,))
+
+
+def execute_web_catalog_registry_resolution_claim(
+    *, tokens: TokenProvider, control: RegistryResolutionControlPlane,
+    github: GitHubMetadataReader, profile: WebCatalogRegistryProfile,
+    claim: RegistryResolutionClaim,
+) -> str:
+    try:
+        result = resolve_web_catalog_registry_claim(claim, profile, github)
+        _retry(lambda: control.registry_resolution_result(tokens.token(), claim, result, str(uuid4())))
+        return "web_catalog_registry_" + result.status
+    except ExecutorError as exc:
+        failure_code = _registry_resolution_failure_code(exc.code, retryable=exc.retryable, http_status=exc.http_status)
+        failure_claim = replace(claim, registry_authority_digest=profile.authority_digest, validator_profile_digest=profile.profile_digest) if failure_code == "registry_profile_changed" else claim
+        _retry(lambda: control.registry_resolution_fail(tokens.token(), failure_claim, failure_code, _registry_resolution_failure_evidence(claim, failure_code, exc.code), str(uuid4())))
+        raise
 
 
 class WebCatalogControlPlane(Protocol):

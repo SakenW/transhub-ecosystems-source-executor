@@ -1018,13 +1018,23 @@ def execute_registry_resolution_one(
     control: RegistryResolutionControlPlane,
     github: GitHubMetadataReader,
     profile: OfficialDirectoryProfile,
+    claim: RegistryResolutionClaim | None = None,
 ) -> str:
     """Resolve at most one official-directory claim without retaining source bytes."""
 
-    claim_token = tokens.token()
-    claim = control.registry_resolution_claim(claim_token)
+    if claim is None:
+        claim = control.registry_resolution_claim(tokens.token())
     if claim is None:
         return "registry_resolution_no_job"
+    if claim.registry_key == "web-site-catalog":
+        from ..web.frozen_catalog_executor import (
+            execute_web_catalog_registry_resolution_claim,
+            load_web_catalog_registry_profile,
+        )
+        return execute_web_catalog_registry_resolution_claim(
+            tokens=tokens, control=control, github=github,
+            profile=load_web_catalog_registry_profile(), claim=claim,
+        )
     try:
         _validate_registry_resolution_binding(claim, profile)
         result = resolve_official_directory_claim(claim, profile, github)
@@ -1618,10 +1628,7 @@ def execute_fair_cycle(
     registry_error: ExecutorError | None = None
     try:
         registry_outcome = execute_registry_resolution_one(
-            tokens=tokens,
-            control=control,
-            github=github,
-            profile=profile,
+            tokens=tokens, control=control, github=github, profile=profile,
         )
     except ExecutorError as exc:
         # Stage B may also fail. Preserve Stage A diagnostics independently.

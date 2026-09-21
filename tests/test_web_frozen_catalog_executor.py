@@ -19,6 +19,7 @@ from adapters.web.frozen_catalog_executor import (
     HttpWebCatalogControlPlane,
     WebCatalogPlan,
     execute_web_catalog_one,
+    load_web_catalog_registry_profile,
     parse_web_catalog_source_plan,
 )
 
@@ -136,6 +137,13 @@ class _Control:
 
 
 class WebFrozenCatalogExecutorTests(unittest.TestCase):
+    def test_registry_profile_is_pinned_to_the_catalog_repository_identity(self) -> None:
+        profile = load_web_catalog_registry_profile()
+        self.assertEqual(profile.registry_key, "web-site-catalog")
+        self.assertEqual(profile.repository_id, 1378958674)
+        self.assertEqual(profile.owner_id, 16665726)
+        self.assertEqual(profile.default_branch, "main")
+
     def test_http_control_reuses_shared_controls_but_parses_catalog_plan_locally(self) -> None:
         content = _catalog()
         raw = _source_plan_payload(content)
