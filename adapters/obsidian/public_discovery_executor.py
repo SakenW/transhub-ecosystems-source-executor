@@ -1511,6 +1511,25 @@ def execute_one(
     claim = control.claim(claim_token)
     if claim is None:
         return "executor_no_task"
+    if claim.source_reference.startswith("web-site-catalog/"):
+        if not isinstance(control, HttpControlPlane):
+            raise ExecutorError("web_catalog_control_plane_unavailable")
+        # Keep Web catalog handling at the external adapter boundary.  The
+        # shared workflow has one global queue, so dispatch only after the
+        # server-issued source reference has selected this exact adapter.
+        from ..web.frozen_catalog_executor import (
+            HttpWebCatalogControlPlane,
+            execute_web_catalog_claim,
+        )
+
+        return execute_web_catalog_claim(
+            tokens=tokens,
+            control=HttpWebCatalogControlPlane(control),
+            metadata=metadata,
+            source=source,
+            uploader=uploader,
+            claim=claim,
+        )
     try:
         plan = control.source_plan(claim_token, claim)
         task = OfflineExecutorTask(
