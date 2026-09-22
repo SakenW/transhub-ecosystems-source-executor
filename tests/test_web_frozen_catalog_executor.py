@@ -215,6 +215,7 @@ class WebFrozenCatalogExecutorTests(unittest.TestCase):
         result = json.loads(uploader.result or b"{}")
         self.assertEqual(result["result"], {"materialization_target_digest": "11" * 32, "protocol": "trans-hub.public-discovery-result", "revision": 2})
         self.assertEqual(result["source_catalog"]["resource"]["resource_key"], "figma")
+        self.assertEqual(result["source_catalog"]["resource"]["object_kind_key"], "localizable_resource")
         self.assertEqual(result["source_catalog"]["stream"]["stream_key"], "web-site:figma")
         self.assertEqual(result["license_evidence"]["license_identifier"], "MIT")
 
