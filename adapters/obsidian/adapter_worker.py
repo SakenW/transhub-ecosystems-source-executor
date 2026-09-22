@@ -19,8 +19,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 16
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v16"
+CONTRACT_REVISION: Final = 17
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v17"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -867,6 +867,9 @@ def _collect_structured_matches(
                 )
     _collect_settings_schema_entries(tokens, matching, collected)
     _collect_settings_group_descriptors(tokens, matching, collected)
+    _collect_svelte_form_descriptors(tokens, matching, collected)
+    _collect_svelte_template_text(tokens, collected)
+    _collect_choice_name_factories(tokens, matching, collected)
     _collect_grouped_ui_text_dictionary(tokens, matching, collected)
     return True
 
@@ -1101,6 +1104,7 @@ def _add_settings_schema_value(
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
     expression: list[_Token],
     key: _Token,
+    symbol: str = "settingsSchema",
 ) -> None:
     counter = [0]
     rendered = _render_expression(expression, counter)
@@ -1113,7 +1117,7 @@ def _add_settings_schema_value(
         {
             "origin": "ui-property",
             "strategy": "structured",
-            "symbol": "settingsSchema",
+            "symbol": symbol,
             "offset": key.start,
             "line": key.line,
             "column": key.column,
@@ -1302,6 +1306,203 @@ def _collect_settings_group_descriptors(
                     _add_settings_schema_value(
                         collected, expression, descriptor_key
                     )
+                elif property_name != "name":
+                    documentation_lead = _first_literal_argument(
+                        _static_object_property(item, property_name)
+                    )
+                    if documentation_lead is not None:
+                        _add_settings_schema_value(
+                            collected,
+                            documentation_lead,
+                            descriptor_key,
+                            "settingsDocumentation",
+                        )
+            _collect_settings_dropdown_options(item, descriptor_key, collected)
+
+
+def _collect_settings_dropdown_options(
+    item: list[_Token],
+    descriptor_key: _Token,
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Collect declarative dropdown display values inside a proven setting."""
+
+    control = _static_object_property(item, "control")
+    if control is None:
+        return
+    control_object = _strip_wrapping_parentheses(control)
+    if (
+        not control_object
+        or control_object[0].raw != "{"
+        or _matching_token_index(control_object, 0) != len(control_object) - 1
+    ):
+        return
+    type_value = _static_object_string_property(control_object, "type")
+    if (
+        type_value is None
+        or _decode_js_literal(type_value[0].raw) != "dropdown"
+    ):
+        return
+    options = _static_object_property(control_object, "options")
+    if options is None:
+        return
+    option_object = _strip_wrapping_parentheses(options)
+    if (
+        not option_object
+        or option_object[0].raw != "{"
+        or _matching_token_index(option_object, 0) != len(option_object) - 1
+    ):
+        return
+    for entry in _split_top_level_tokens(option_object[1:-1]):
+        colon = _top_level_token_index(entry, ":")
+        if colon <= 0:
+            continue
+        value = entry[colon + 1 :]
+        if len(value) != 1 or value[0].kind != "literal":
+            continue
+        _add_settings_schema_value(
+            collected, value, descriptor_key, "settingsDropdownOption"
+        )
+
+
+def _collect_svelte_form_descriptors(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Collect Svelte-lowered rows by their stable object shape, not callee."""
+
+    for index, token in enumerate(tokens):
+        if token.raw != "{":
+            continue
+        end = matching[index] if index < len(matching) else -1
+        if end < 0 or end - index > SETTINGS_SCHEMA_MAX_ENTRY_TOKENS:
+            continue
+        object_tokens = tokens[index : end + 1]
+        name = _static_object_string_property(object_tokens, "name")
+        if name is None:
+            continue
+        heading = _static_object_property(object_tokens, "heading")
+        is_heading = heading is not None and [part.raw for part in heading] in (
+            ["true"], ["!", "0"]
+        )
+        is_interactive = any(
+            _static_object_property(object_tokens, property_name) is not None
+            for property_name in ("control", "children", "$$slots")
+        )
+        if not is_heading and not is_interactive:
+            continue
+        descriptor_key = tokens[index + 1] if index + 1 < len(tokens) else token
+        _add_settings_schema_value(collected, name, descriptor_key, "svelteForm")
+        for property_name in ("desc", "description"):
+            description = _static_object_string_property(object_tokens, property_name)
+            if description is not None:
+                _add_settings_schema_value(
+                    collected, description, descriptor_key, "svelteForm"
+                )
+
+
+def _collect_svelte_template_text(
+    tokens: list[_Token],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Collect static Svelte template text marked by its ``<!>`` anchor."""
+
+    for index in range(len(tokens) - 3):
+        if (
+            tokens[index].kind != "identifier"
+            or tokens[index + 1].raw != "("
+            or tokens[index + 2].kind != "literal"
+            or tokens[index + 3].raw != ")"
+        ):
+            continue
+        literal = tokens[index + 2]
+        template = _decode_js_literal(literal.raw)
+        if template is None or "<!>" not in template:
+            continue
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", template.replace("<!>", " "))).strip()
+        if not text:
+            continue
+        _add_candidate(
+            collected,
+            text,
+            "ui-property",
+            {
+                "origin": "ui-property",
+                "strategy": "structured",
+                "symbol": "svelteTemplate",
+                "offset": literal.start,
+                "line": literal.line,
+                "column": literal.column,
+                "literal_start": literal.start,
+                "literal_end": literal.end,
+            },
+            static_probe=text,
+            ui_context_verified=True,
+        )
+
+
+def _collect_choice_name_factories(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Collect a switch factory only when three or more returns are ``New …`` UI labels."""
+
+    for index, token in enumerate(tokens):
+        if token.raw != "switch":
+            continue
+        open_index = next(
+            (candidate for candidate in range(index + 1, len(tokens)) if tokens[candidate].raw == "{"),
+            -1,
+        )
+        if open_index < 0:
+            continue
+        end = matching[open_index] if open_index < len(matching) else -1
+        if end < 0:
+            continue
+        values: list[_Token] = []
+        for candidate in range(open_index + 1, end - 4):
+            if (
+                tokens[candidate].raw == "case"
+                and tokens[candidate + 1].kind == "literal"
+                and tokens[candidate + 2].raw == ":"
+                and tokens[candidate + 3].raw == "return"
+                and tokens[candidate + 4].kind == "literal"
+            ):
+                values.append(tokens[candidate + 4])
+        decoded = [_decode_js_literal(value.raw) for value in values]
+        if len(values) < 3 or any(
+            value is None or re.fullmatch(r"New\s+.+", value) is None
+            for value in decoded
+        ):
+            continue
+        for value in values:
+            _add_settings_schema_value(
+                collected, [value], value, "choiceNameFactory"
+            )
+
+
+def _static_object_property(
+    object_tokens: list[_Token], property_name: str
+) -> list[_Token] | None:
+    for prop in _split_top_level_tokens(object_tokens[1:-1]):
+        colon = _top_level_token_index(prop, ":")
+        if colon <= 0 or _static_catalog_key(prop[:colon]) != property_name:
+            continue
+        return prop[colon + 1 :]
+    return None
+
+
+def _first_literal_argument(value: list[_Token] | None) -> list[_Token] | None:
+    if value is None:
+        return None
+    try:
+        open_index = next(index for index, token in enumerate(value) if token.raw == "(")
+    except StopIteration:
+        return None
+    first = value[open_index + 1] if open_index + 1 < len(value) else None
+    return [first] if first is not None and first.kind == "literal" else None
 
 
 def _single_line_text(rendered: _RenderedExpression) -> bool:
