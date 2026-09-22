@@ -96,6 +96,15 @@ class _Tokens:
         return "oidc"
 
 
+class _SequentialTokens:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def token(self) -> str:
+        self.calls += 1
+        return f"oidc-{self.calls}"
+
+
 class _Source:
     def __init__(self, content: bytes) -> None:
         self.content = content
@@ -116,11 +125,13 @@ class _Control:
     def __init__(self, plan: WebCatalogPlan) -> None:
         self.plan = plan
         self.failures: list[tuple[str, str]] = []
+        self.source_plan_tokens: list[str] = []
 
     def claim(self, _token: str) -> Claim:
         return Claim("11111111-1111-4111-8111-111111111111", "registry/opaque", "ee" * 32, 7, "web-site-catalog", "figma")
 
-    def source_plan(self, _token: str, _claim: Claim) -> WebCatalogPlan:
+    def source_plan(self, token: str, _claim: Claim) -> WebCatalogPlan:
+        self.source_plan_tokens.append(token)
         return self.plan
 
     def grant(self, _token: str, _claim: Claim, _plan: WebCatalogPlan, _result: bytes, _command: str) -> UploadGrant:
@@ -205,6 +216,29 @@ class WebFrozenCatalogExecutorTests(unittest.TestCase):
         self.assertEqual(result["result"], {"materialization_target_digest": "11" * 32, "protocol": "trans-hub.public-discovery-result", "revision": 2})
         self.assertEqual(result["source_catalog"]["resource"]["resource_key"], "web-site:figma")
         self.assertEqual(result["license_evidence"]["license_identifier"], "MIT")
+
+    def test_reuses_the_claim_token_for_the_source_plan(self) -> None:
+        content = _catalog()
+        control = _Control(_plan(content))
+        metadata = Mock()
+        metadata.json_object.return_value = {
+            "license": {"spdx_id": "MIT"},
+            "content": base64.b64encode(b"MIT").decode(),
+            "encoding": "base64",
+            "path": "LICENSE",
+        }
+
+        self.assertEqual(
+            execute_web_catalog_one(
+                tokens=_SequentialTokens(),
+                control=control,
+                metadata=metadata,
+                source=_Source(content),
+                uploader=_Uploader(),
+            ),
+            "web_catalog_result_handed_off",
+        )
+        self.assertEqual(control.source_plan_tokens, ["oidc-1"])
 
     def test_rejects_asset_for_a_different_site_and_closes_task(self) -> None:
         content = _catalog("replit")
