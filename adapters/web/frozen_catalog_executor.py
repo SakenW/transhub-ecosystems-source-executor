@@ -521,6 +521,7 @@ def _build_result(
     # generic adoption contract binds the resource identity to the registry's
     # exact external object id, so normalize only this client-side resource key.
     normalized_resource["resource_key"] = external_object_id
+    normalized_resource["object_kind_key"] = "localizable_resource"
     normalized_catalog["resource"] = normalized_resource
     return _canonical_json(
         {
