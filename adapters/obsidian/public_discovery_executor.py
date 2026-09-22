@@ -1539,6 +1539,7 @@ def execute_one(
         )
 
         return execute_web_catalog_claim(
+            claim_token=claim_token,
             tokens=tokens,
             control=HttpWebCatalogControlPlane(control),
             metadata=metadata,

@@ -393,10 +393,12 @@ def execute_web_catalog_one(
 ) -> str:
     """Hand one frozen Web catalog to the existing verified-result path."""
 
-    claim = control.claim(tokens.token())
+    claim_token = tokens.token()
+    claim = control.claim(claim_token)
     if claim is None:
         return "web_catalog_no_task"
     return execute_web_catalog_claim(
+        claim_token=claim_token,
         tokens=tokens,
         control=control,
         metadata=metadata,
@@ -408,6 +410,7 @@ def execute_web_catalog_one(
 
 def execute_web_catalog_claim(
     *,
+    claim_token: str,
     tokens: TokenProvider,
     control: WebCatalogControlPlane,
     metadata: GitHubMetadataReader,
@@ -419,7 +422,7 @@ def execute_web_catalog_claim(
 
     try:
         site_key = _site_key_from_claim(claim)
-        plan = control.source_plan(tokens.token(), claim)
+        plan = control.source_plan(claim_token, claim)
         catalog = _load_catalog(source, plan, site_key)
         evidence = _read_pinned_license_evidence(metadata, plan)
         result = _build_result(catalog, plan, evidence)
