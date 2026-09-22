@@ -214,7 +214,8 @@ class WebFrozenCatalogExecutorTests(unittest.TestCase):
         self.assertIsNotNone(uploader.result)
         result = json.loads(uploader.result or b"{}")
         self.assertEqual(result["result"], {"materialization_target_digest": "11" * 32, "protocol": "trans-hub.public-discovery-result", "revision": 2})
-        self.assertEqual(result["source_catalog"]["resource"]["resource_key"], "web-site:figma")
+        self.assertEqual(result["source_catalog"]["resource"]["resource_key"], "figma")
+        self.assertEqual(result["source_catalog"]["stream"]["stream_key"], "web-site:figma")
         self.assertEqual(result["license_evidence"]["license_identifier"], "MIT")
 
     def test_reuses_the_claim_token_for_the_source_plan(self) -> None:

@@ -425,7 +425,7 @@ def execute_web_catalog_claim(
         plan = control.source_plan(claim_token, claim)
         catalog = _load_catalog(source, plan, site_key)
         evidence = _read_pinned_license_evidence(metadata, plan)
-        result = _build_result(catalog, plan, evidence)
+        result = _build_result(catalog, plan, evidence, site_key)
         if len(result) > plan.result_max_bytes:
             raise ExecutorError("web_catalog_result_size_invalid")
         grant = _retry(
@@ -507,8 +507,21 @@ def _load_catalog(source: SourceReader, plan: WebCatalogPlan, site_key: str) -> 
 
 
 def _build_result(
-    catalog: dict[str, object], plan: WebCatalogPlan, evidence: LicenseEvidence
+    catalog: dict[str, object],
+    plan: WebCatalogPlan,
+    evidence: LicenseEvidence,
+    external_object_id: str,
 ) -> bytes:
+    resource = catalog.get("resource")
+    if not isinstance(resource, dict):
+        raise ExecutorError("web_catalog_source_shape_invalid")
+    normalized_catalog = dict(catalog)
+    normalized_resource = dict(resource)
+    # The frozen Web catalog retains its own namespaced stream identity.  The
+    # generic adoption contract binds the resource identity to the registry's
+    # exact external object id, so normalize only this client-side resource key.
+    normalized_resource["resource_key"] = external_object_id
+    normalized_catalog["resource"] = normalized_resource
     return _canonical_json(
         {
             "license_evidence": {
@@ -522,7 +535,7 @@ def _build_result(
                 "protocol": "trans-hub.public-discovery-result",
                 "revision": 2,
             },
-            "source_catalog": catalog,
+            "source_catalog": normalized_catalog,
         }
     )
 
