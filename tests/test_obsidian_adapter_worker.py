@@ -15,6 +15,7 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
                 'const group = { type: "group", heading: "Choice picker", items: [{ name: "New note from template", desc: docs("Collect a choice\\\'s inputs in one form before it runs.", ref), control: { type: "dropdown", options: { bottom: "Show at the bottom (keeps your top choice first)", top: "Show at the top", off: "Hide" } } }] };',
                 'mount(node, { name: "Capture to active file", desc: "Capture into whichever note is open when the choice runs, instead of a fixed target.", control: value => value });',
                 'mount(node, { name: "Create file if it doesn\\\'t exist", control: value => value });',
+                'mount(node, { name: "Behavior", heading: !0 });',
             ]
         )
         snapshot = json.loads(
@@ -39,6 +40,7 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
                 "Capture to active file",
                 "Capture into whichever note is open when the choice runs, instead of a fixed target.",
                 "Create file if it doesn't exist",
+                "Behavior",
             }.issubset(strings)
         )
         self.assertEqual(strings["Show at the top"]["evidence"][0]["symbol"], "settingsDropdownOption")
