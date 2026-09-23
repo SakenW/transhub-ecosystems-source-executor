@@ -156,6 +156,7 @@ return promise;}
         bundle = "\n".join(
             [
                 'function choiceName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } }',
+                'button.onClick(() => editor.onAddChoice(choiceName(kind), kind));',
                 "const markup = q('<div><h4>Location</h4><!></div>');",
                 'const group = { type: "group", heading: "Choice picker", items: [{ name: "New note from template", desc: docs("Collect a choice\\\'s inputs in one form before it runs.", ref), control: { type: "dropdown", options: { bottom: "Show at the bottom (keeps your top choice first)", top: "Show at the top", off: "Hide" } } }] };',
                 'mount(node, { name: "Capture to active file", desc: "Capture into whichever note is open when the choice runs, instead of a fixed target.", control: value => value });',
@@ -170,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 24)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v24")
+        self.assertEqual(snapshot["contract_revision"], 25)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v25")
         self.assertTrue(
             {
                 "New template",
@@ -198,6 +199,26 @@ return promise;}
 
     def test_choice_factory_does_not_borrow_unrelated_switch_brace(self) -> None:
         bundle = 'switch (kind); const options = { case "Template": return "New template", case "Capture": return "New capture", case "Macro": return "New macro" };'
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        self.assertNotIn("New template", {row["source"] for row in snapshot["strings"]})
+
+    def test_internal_new_prefixed_switch_is_not_choice_ui_copy(self) -> None:
+        bundle = 'function internalName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } const internal = internalName("Template");'
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        self.assertNotIn("New template", {row["source"] for row in snapshot["strings"]})
+
+    def test_shadowed_choice_factory_name_is_not_ui_proof(self) -> None:
+        bundle = 'function choiceName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } function choiceName(other) { return other; } editor.onAddChoice(choiceName(kind), kind);'
         snapshot = json.loads(
             build_snapshot(
                 b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',

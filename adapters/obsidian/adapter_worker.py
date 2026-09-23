@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 24
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v24"
+CONTRACT_REVISION: Final = 25
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v25"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1527,10 +1527,47 @@ def _collect_choice_name_factories(
     matching: Sequence[int],
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
 ) -> None:
-    """Collect a switch factory only when three or more returns are ``New …`` UI labels."""
+    """Collect New-prefixed names only when consumed by the choice UI callback."""
+
+    ui_factory_names: set[str] = set()
+    declaration_counts: dict[str, int] = {}
+    for index in range(len(tokens)):
+        if tokens[index].raw == "function" and index + 1 < len(tokens):
+            name = tokens[index + 1]
+            if name.kind == "identifier":
+                declaration_counts[name.raw] = declaration_counts.get(name.raw, 0) + 1
+        if index + 3 >= len(tokens):
+            continue
+        if tokens[index].raw != "onAddChoice" or tokens[index + 1].raw != "(":
+            continue
+        factory_name = tokens[index + 2]
+        factory_call_open = index + 3
+        if (
+            factory_name.kind == "identifier"
+            and tokens[factory_call_open].raw == "("
+            and factory_call_open < matching[factory_call_open] < matching[index + 1]
+        ):
+            ui_factory_names.add(factory_name.raw)
 
     for index, token in enumerate(tokens):
         if token.kind != "identifier" or token.raw != "switch":
+            continue
+        function_body_open = index - 1
+        parameters_close = function_body_open - 1
+        if (
+            function_body_open < 0
+            or tokens[function_body_open].raw != "{"
+            or tokens[parameters_close].raw != ")"
+        ):
+            continue
+        parameters_open = matching[parameters_close]
+        if (
+            parameters_open < 2
+            or tokens[parameters_open - 1].kind != "identifier"
+            or tokens[parameters_open - 2].raw != "function"
+            or declaration_counts.get(tokens[parameters_open - 1].raw) != 1
+            or tokens[parameters_open - 1].raw not in ui_factory_names
+        ):
             continue
         condition_open = index + 1
         if condition_open >= len(tokens) or tokens[condition_open].raw != "(":
