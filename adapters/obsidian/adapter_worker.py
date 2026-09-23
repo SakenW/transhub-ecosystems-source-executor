@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 21
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v21"
+CONTRACT_REVISION: Final = 22
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v22"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1864,6 +1864,15 @@ def _transparent_wrapper_argument(tokens: list[_Token]) -> list[_Token] | None:
 def _is_plausible_transparent_wrapper_text(value: str) -> bool:
     text = value.strip()
     if "_" in text:
+        return False
+    allowed_punctuation = set(".,:;!?()'\"&/[]+-")
+    if any(
+        not character.isspace()
+        and not character.isdigit()
+        and character not in allowed_punctuation
+        and "LATIN" not in unicodedata.name(character, "")
+        for character in text
+    ):
         return False
     latin_letters = [
         character for character in text if "LATIN" in unicodedata.name(character, "")

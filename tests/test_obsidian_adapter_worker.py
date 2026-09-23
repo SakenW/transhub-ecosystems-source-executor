@@ -9,6 +9,24 @@ from adapters.obsidian.adapter_worker import build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_static_wrapper_in_ui_sink_keeps_punctuation_but_rejects_html(self) -> None:
+        bundle = (
+            'setting.setName(R("Date & Time"));'
+            'setting.setName(R("Add archive date/time after card title"));'
+            'setting.setDesc(R("When toggled, dates link to daily notes. Eg. [[2021-04-26]]"));'
+            'setting.setDesc(R("<div>Unsafe HTML description</div>"));'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertIn("Date & Time", sources)
+        self.assertIn("Add archive date/time after card title", sources)
+        self.assertNotIn("<div>Unsafe HTML description</div>", sources)
+
     def test_locale_catalog_skips_function_return_templates_without_static_client_slot(self) -> None:
         bundle = (
             'var en={title:t=>`Move ${t} files`,static:"Static label"};'
@@ -130,8 +148,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 21)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v21")
+        self.assertEqual(snapshot["contract_revision"], 22)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v22")
         self.assertTrue(
             {
                 "New template",
