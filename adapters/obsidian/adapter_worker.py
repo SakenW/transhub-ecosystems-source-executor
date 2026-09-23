@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 20
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v20"
+CONTRACT_REVISION: Final = 21
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v21"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -2382,18 +2382,9 @@ def _static_catalog_key(tokens: list[_Token]) -> str | None:
 
 
 def _render_locale_value(tokens: list[_Token]) -> _RenderedExpression | None:
-    expression = tokens
-    depth = 0
-    for index in range(len(tokens) - 1):
-        token = tokens[index]
-        if token.raw in {"(", "[", "{"}:
-            depth += 1
-        elif token.raw in {")", "]", "}"}:
-            depth -= 1
-        elif token.raw == "=" and tokens[index + 1].raw == ">" and depth == 0:
-            expression = tokens[index + 2 :]
-            break
-    return _render_expression(expression, [0])
+    # Client catalogs only bind literal slots. A function-returned template
+    # depends on runtime arguments and cannot be matched as one static source.
+    return _render_expression(tokens, [0])
 
 
 def _collect_static_locale_value(

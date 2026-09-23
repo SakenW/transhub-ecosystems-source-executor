@@ -9,6 +9,23 @@ from adapters.obsidian.adapter_worker import build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_locale_catalog_skips_function_return_templates_without_static_client_slot(self) -> None:
+        bundle = (
+            'var en={title:t=>`Move ${t} files`,static:"Static label"};'
+            'var de={title:t=>`Verschiebe ${t} Dateien`,static:"Statische Beschriftung"};'
+            'var zh={title:t=>`移动 ${t} 个文件`,static:"静态标签"};'
+            'var locales={de:de,en:en,zh:zh};'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertIn("Static label", sources)
+        self.assertNotIn("Move {{th:expr:0}} files", sources)
+
     def test_settings_schema_accepts_qualified_siblings_after_metadata(self) -> None:
         bundle = (
             'const settings={version:1,'
@@ -113,8 +130,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 20)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v20")
+        self.assertEqual(snapshot["contract_revision"], 21)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v21")
         self.assertTrue(
             {
                 "New template",
