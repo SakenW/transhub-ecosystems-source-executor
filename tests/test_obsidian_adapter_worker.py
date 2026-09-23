@@ -9,6 +9,28 @@ from adapters.obsidian.adapter_worker import build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_large_function_reference_is_not_mistaken_for_settings_entry(self) -> None:
+        functions = ",".join(f"f{index}:{{name:'function {index}'}}" for index in range(140))
+        bundle = (
+            'const docs={'
+            'date:{name:"date",description:"This module contains date helpers."},'
+            'system:{name:"system",description:"This module contains system helpers."},'
+            'web:{name:"web",description:"This module contains web helpers."},'
+            'file:{name:"file",description:"This module contains every internal function related to files.",'
+            f'functions:{{{functions}}}}}'
+            '};'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertIn("date", sources)
+        self.assertNotIn("file", sources)
+        self.assertNotIn("This module contains every internal function related to files.", sources)
+
     def test_static_wrapper_in_ui_sink_keeps_punctuation_but_rejects_html(self) -> None:
         bundle = (
             'setting.setName(R("Date & Time"));'
@@ -148,8 +170,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 22)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v22")
+        self.assertEqual(snapshot["contract_revision"], 23)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v23")
         self.assertTrue(
             {
                 "New template",

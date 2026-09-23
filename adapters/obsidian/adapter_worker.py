@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 22
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v22"
+CONTRACT_REVISION: Final = 23
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v23"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1031,6 +1031,7 @@ def _collect_settings_schema_entries(
                 key.kind != "identifier"
                 or not value
                 or value[0].raw != "{"
+                or len(value) - 1 > SETTINGS_SCHEMA_MAX_ENTRY_TOKENS
                 or _matching_token_index(value, 0) != len(value) - 1
             ):
                 continue
