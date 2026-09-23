@@ -6,10 +6,16 @@ on:
     # to be delayed. A run only claims work that already exists on the server.
     - cron: "7-59/5 * * * *"
   workflow_dispatch:
+    inputs:
+      attest_only:
+        description: "Attest the protected branch artifact without claiming production work"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   id-token: write
+  attestations: write
 
 concurrency:
   group: public-discovery-executor
@@ -65,10 +71,21 @@ jobs:
           cmp "$temporary/first.receipt" "$temporary/second.receipt"
           install -m 0400 "$temporary/first.pyz" "${RUNNER_TEMP}/public-discovery-executor.pyz"
 
+      - name: Attest the protected offline artifact without claiming work
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.attest_only == true
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/public-discovery-executor.pyz
+
       - name: Execute one fair registry-resolution and source-discovery cycle
         if: >-
           github.ref_protected == true &&
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          (github.event_name != 'workflow_dispatch' || inputs.attest_only != true)
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}

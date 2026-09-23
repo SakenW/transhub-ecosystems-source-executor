@@ -26,6 +26,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertNotIn(forbidden_trigger, workflow)
         self.assertIn("contents: read", workflow)
         self.assertIn("id-token: write", workflow)
+        self.assertIn("attestations: write", workflow)
         self.assertIn("group: public-discovery-executor", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("github.ref_protected != true", workflow)
@@ -54,6 +55,10 @@ class WorkflowContractTests(unittest.TestCase):
             "adapters.obsidian.public_discovery_executor",
             workflow,
         )
+        self.assertRegex(workflow, r"actions/attest@[0-9a-f]{40}")
+        self.assertIn("subject-path: ${{ runner.temp }}/public-discovery-executor.pyz", workflow)
+        self.assertIn("inputs.attest_only == true", workflow)
+        self.assertIn("inputs.attest_only != true", workflow)
         self.assertNotRegex(workflow, r"(?m)^\s*[^#\n]*\+\s{2,}")
         for forbidden_channel in (
             "actions/cache",
