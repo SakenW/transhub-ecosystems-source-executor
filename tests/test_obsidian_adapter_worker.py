@@ -25,8 +25,8 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 17)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v17")
+        self.assertEqual(snapshot["contract_revision"], 18)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v18")
         self.assertTrue(
             {
                 "New template",
@@ -43,5 +43,38 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
                 "Behavior",
             }.issubset(strings)
         )
-        self.assertEqual(strings["Show at the top"]["evidence"][0]["symbol"], "settingsDropdownOption")
-        self.assertEqual(strings["Capture to active file"]["evidence"][0]["symbol"], "svelteForm")
+        self.assertEqual(
+            strings["Show at the top"]["evidence"][0]["symbol"],
+            "settingsDropdownOption",
+        )
+        self.assertEqual(
+            strings["Capture to active file"]["evidence"][0]["symbol"], "svelteForm"
+        )
+
+    def test_svelte_template_text_uses_real_static_nodes_without_html_patch_span(
+        self,
+    ) -> None:
+        bundle = "const markup = q('<div><span>Alpha</span><span>Beta</span><!><p>Save &amp; Close</p><p>Before <!> After</p><span title=\"Hidden > attribute\">Visible</span><span>Unknown &custom;</span><code>Code internals</code><script>Script internals</script><style>Style internals</style></div>');"
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        for source in ("Alpha", "Beta", "Save & Close", "Before", "After", "Visible"):
+            self.assertIn(source, strings)
+        for source in (
+            "Alpha Beta",
+            "Save &amp; Close",
+            "Unknown &custom;",
+            "Code internals",
+            "Script internals",
+            "Style internals",
+            "Hidden > attribute",
+        ):
+            self.assertNotIn(source, strings)
+        self.assertEqual(
+            strings["Save & Close"]["evidence"][0]["symbol"], "svelteTemplate"
+        )
+        self.assertNotIn("literal_start", strings["Save & Close"]["evidence"][0])

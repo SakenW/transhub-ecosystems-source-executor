@@ -19,8 +19,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 17
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v17"
+CONTRACT_REVISION: Final = 18
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v18"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -30,7 +30,9 @@ MAX_LOCALE_ENTRIES: Final = 10_000
 MAX_LOCALE_DEPTH: Final = 16
 MAX_README_COMPONENT_BYTES: Final = 1024 * 1024
 QUOTED: Final = r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
-QUOTED_NO_CAPTURE: Final = r'(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
+QUOTED_NO_CAPTURE: Final = (
+    r'(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
+)
 UI_CALL: Final = re.compile(
     rf"(?:Notice|setText|setButtonText|setName|setDesc|setPlaceholder|"
     rf"setTooltip|setTitle|addHeading|appendText)\s*\(\s*{QUOTED}"
@@ -785,7 +787,11 @@ def _collect_structured_matches(
             for argument in arguments:
                 _collect_obsidian_create_text_option(argument, token, collected)
             continue
-        if token.raw == "addOptions" and next_token is not None and next_token.raw == "(":
+        if (
+            token.raw == "addOptions"
+            and next_token is not None
+            and next_token.raw == "("
+        ):
             call = _read_call_arguments(tokens, index + 1, matching)
             if call is None:
                 return False
@@ -832,9 +838,7 @@ def _collect_structured_matches(
                 "ui-property",
                 token,
                 ui_context_verified=True,
-                accept_rendered=_single_line_text
-                if token.raw == "innerText"
-                else None,
+                accept_rendered=_single_line_text if token.raw == "innerText" else None,
             )
             continue
         if (
@@ -905,9 +909,7 @@ def _collect_grouped_ui_text_dictionary(
         end = cast(int, matching[open_index]) if open_index < len(matching) else -1
         if end < 0 or end - open_index > SETTINGS_SCHEMA_MAX_PARENT_TOKENS:
             continue
-        groups = _collect_ui_text_dictionary_groups(
-            tokens[open_index + 1 : end], 0
-        )
+        groups = _collect_ui_text_dictionary_groups(tokens[open_index + 1 : end], 0)
         if (
             groups["group_count"] < UI_TEXT_DICTIONARY_MIN_GROUPS
             or groups["value_count"] < UI_TEXT_DICTIONARY_MIN_VALUES
@@ -968,10 +970,9 @@ def _collect_ui_text_dictionary_groups(
         decoded = _decode_js_literal(value[0].raw)
         if decoded is None:
             continue
-        if (
-            not _is_translatable_ui_text(decoded)
-            or not _is_plausible_source_locale_text(decoded, "en")
-        ):
+        if not _is_translatable_ui_text(
+            decoded
+        ) or not _is_plausible_source_locale_text(decoded, "en"):
             continue
         value_count += 1
         if _is_title_case_ui_text(decoded):
@@ -1039,12 +1040,9 @@ def _collect_settings_schema_entries(
                 or _matching_token_index(value, 0) != len(value) - 1
             ):
                 continue
-            if (
-                _static_object_string_property(value, "name") is None
-                or (
-                    _static_object_string_property(value, "desc") is None
-                    and _static_object_string_property(value, "description") is None
-                )
+            if _static_object_string_property(value, "name") is None or (
+                _static_object_string_property(value, "desc") is None
+                and _static_object_string_property(value, "description") is None
             ):
                 continue
             schema_entries.append((key, value))
@@ -1291,21 +1289,16 @@ def _collect_settings_group_descriptors(
         if type_value is None or heading_value is None or items is None:
             continue
         if not any(
-            _static_object_string_property(item, "name") is not None
-            for item in items
+            _static_object_string_property(item, "name") is not None for item in items
         ):
             continue
-        descriptor_key = (
-            tokens[index + 1] if index + 1 < len(tokens) else token
-        )
+        descriptor_key = tokens[index + 1] if index + 1 < len(tokens) else token
         _add_settings_schema_value(collected, heading_value, descriptor_key)
         for item in items:
             for property_name in ("name", "desc", "description"):
                 expression = _static_object_string_property(item, property_name)
                 if expression is not None:
-                    _add_settings_schema_value(
-                        collected, expression, descriptor_key
-                    )
+                    _add_settings_schema_value(collected, expression, descriptor_key)
                 elif property_name != "name":
                     documentation_lead = _first_literal_argument(
                         _static_object_property(item, property_name)
@@ -1338,10 +1331,7 @@ def _collect_settings_dropdown_options(
     ):
         return
     type_value = _static_object_string_property(control_object, "type")
-    if (
-        type_value is None
-        or _decode_js_literal(type_value[0].raw) != "dropdown"
-    ):
+    if type_value is None or _decode_js_literal(type_value[0].raw) != "dropdown":
         return
     options = _static_object_property(control_object, "options")
     if options is None:
@@ -1384,7 +1374,8 @@ def _collect_svelte_form_descriptors(
             continue
         heading = _static_object_property(object_tokens, "heading")
         is_heading = heading is not None and [part.raw for part in heading] in (
-            ["true"], ["!", "0"]
+            ["true"],
+            ["!", "0"],
         )
         is_interactive = any(
             _static_object_property(object_tokens, property_name) is not None
@@ -1418,28 +1409,122 @@ def _collect_svelte_template_text(
             continue
         literal = tokens[index + 2]
         template = _decode_js_literal(literal.raw)
-        if template is None or "<!>" not in template:
+        if template is None:
             continue
-        text = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", template.replace("<!>", " "))).strip()
-        if not text:
+        for text in _static_svelte_template_text_nodes(template):
+            _add_candidate(
+                collected,
+                text,
+                "ui-property",
+                {
+                    "origin": "ui-property",
+                    "strategy": "structured",
+                    "symbol": "svelteTemplate",
+                    "offset": literal.start,
+                    "line": literal.line,
+                    "column": literal.column,
+                },
+                static_probe=text,
+                ui_context_verified=True,
+            )
+
+
+def _static_svelte_template_text_nodes(template: str) -> list[str]:
+    if len(template) > 100_000 or "<!>" not in template:
+        return []
+    nodes: list[str] = []
+    chunk: list[str] = []
+    skipped_tag: str | None = None
+
+    def flush() -> None:
+        if not chunk:
+            return
+        text = _decode_svelte_html_text("".join(chunk))
+        chunk.clear()
+        if text:
+            nodes.append(text)
+
+    index = 0
+    while index < len(template):
+        if template[index] != "<":
+            if skipped_tag is None:
+                chunk.append(template[index])
+            index += 1
             continue
-        _add_candidate(
-            collected,
-            text,
-            "ui-property",
-            {
-                "origin": "ui-property",
-                "strategy": "structured",
-                "symbol": "svelteTemplate",
-                "offset": literal.start,
-                "line": literal.line,
-                "column": literal.column,
-                "literal_start": literal.start,
-                "literal_end": literal.end,
-            },
-            static_probe=text,
-            ui_context_verified=True,
-        )
+        if template.startswith("<!--", index):
+            flush()
+            end = template.find("-->", index + 4)
+            if end < 0:
+                return []
+            index = end + 3
+            continue
+        end = _svelte_html_tag_end(template, index + 1)
+        if end < 0:
+            return []
+        body = template[index + 1 : end].strip()
+        index = end + 1
+        if body == "!":
+            flush()
+            continue
+        match = re.match(r"^(/)?([A-Za-z][A-Za-z0-9:-]*)(?:\s|/|$)", body)
+        if match is None:
+            return []
+        tag = match.group(2).lower()
+        closing = match.group(1) == "/"
+        if skipped_tag is not None:
+            if closing and tag == skipped_tag:
+                skipped_tag = None
+            continue
+        flush()
+        if (
+            not closing
+            and not re.search(r"/\s*$", body)
+            and tag in {"script", "style", "code", "pre", "textarea"}
+        ):
+            skipped_tag = tag
+    if skipped_tag is not None:
+        return []
+    flush()
+    return nodes
+
+
+def _svelte_html_tag_end(template: str, start: int) -> int:
+    quote: str | None = None
+    for index in range(start, len(template)):
+        char = template[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == ">":
+            return index
+    return -1
+
+
+def _decode_svelte_html_text(raw: str) -> str | None:
+    named = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'", "nbsp": " "}
+    valid = True
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal valid
+        entity = match.group(1)
+        if entity in named:
+            return named[entity]
+        if not entity.startswith("#"):
+            valid = False
+            return match.group(0)
+        hex_value = entity[1:2].lower() == "x"
+        point = int(entity[2:] if hex_value else entity[1:], 16 if hex_value else 10)
+        if point < 1 or point > 0x10FFFF or 0xD800 <= point <= 0xDFFF:
+            valid = False
+            return match.group(0)
+        return chr(point)
+
+    decoded = re.sub(
+        r"&(#(?:[xX][0-9A-Fa-f]+|[0-9]+)|[A-Za-z][A-Za-z0-9]+);", replace, raw
+    )
+    return re.sub(r"\s+", " ", decoded).strip() if valid else None
 
 
 def _collect_choice_name_factories(
@@ -1453,7 +1538,11 @@ def _collect_choice_name_factories(
         if token.raw != "switch":
             continue
         open_index = next(
-            (candidate for candidate in range(index + 1, len(tokens)) if tokens[candidate].raw == "{"),
+            (
+                candidate
+                for candidate in range(index + 1, len(tokens))
+                if tokens[candidate].raw == "{"
+            ),
             -1,
         )
         if open_index < 0:
@@ -1478,9 +1567,7 @@ def _collect_choice_name_factories(
         ):
             continue
         for value in values:
-            _add_settings_schema_value(
-                collected, [value], value, "choiceNameFactory"
-            )
+            _add_settings_schema_value(collected, [value], value, "choiceNameFactory")
 
 
 def _static_object_property(
@@ -1498,7 +1585,9 @@ def _first_literal_argument(value: list[_Token] | None) -> list[_Token] | None:
     if value is None:
         return None
     try:
-        open_index = next(index for index, token in enumerate(value) if token.raw == "(")
+        open_index = next(
+            index for index, token in enumerate(value) if token.raw == "("
+        )
     except StopIteration:
         return None
     first = value[open_index + 1] if open_index + 1 < len(value) else None
@@ -1593,7 +1682,10 @@ def _collect_react_create_element(
         return
     if len(arguments) > 1:
         _collect_native_dom_visible_properties(
-            arguments[1], call_token, collected, accepts_children=native_tag or component_tag
+            arguments[1],
+            call_token,
+            collected,
+            accepts_children=native_tag or component_tag,
         )
     for child in arguments[2:]:
         _add_safe_native_dom_expression(
@@ -1779,7 +1871,9 @@ def _is_plausible_transparent_wrapper_text(value: str) -> bool:
     text = value.strip()
     if "_" in text:
         return False
-    latin_letters = [character for character in text if "LATIN" in unicodedata.name(character, "")]
+    latin_letters = [
+        character for character in text if "LATIN" in unicodedata.name(character, "")
+    ]
     if len(latin_letters) < 2:
         return False
     if any(
@@ -1788,7 +1882,9 @@ def _is_plausible_transparent_wrapper_text(value: str) -> bool:
         for character in text
     ):
         return False
-    return bool(text and (text[0].isupper() or any(character.isspace() for character in text)))
+    return bool(
+        text and (text[0].isupper() or any(character.isspace() for character in text))
+    )
 
 
 def _render_safe_native_dom_expression(
@@ -3074,7 +3170,9 @@ def build_snapshot(
     plugin_name = _manifest_value(manifest, "name")
     plugin_version = _manifest_value(manifest, "version")
     if authority_resource_version is not None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", authority_resource_version):
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", authority_resource_version
+        ):
             raise AdapterContractError("authority_resource_version_invalid")
         public_resource_version = authority_resource_version
     else:
