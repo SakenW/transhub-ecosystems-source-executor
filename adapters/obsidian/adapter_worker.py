@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 19
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v19"
+CONTRACT_REVISION: Final = 20
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v20"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1017,16 +1017,8 @@ def _collect_settings_schema_entries(
     for index, token in enumerate(tokens):
         if token.raw != "{":
             continue
-        if index + 3 >= len(tokens):
-            continue
-        if (
-            tokens[index + 1].kind != "identifier"
-            or tokens[index + 2].raw != ":"
-            or tokens[index + 3].raw != "{"
-        ):
-            continue
         end = matching[index] if index < len(matching) else -1
-        if end < 0 or end >= len(tokens):
+        if end < 0 or end >= len(tokens) or end - index > SETTINGS_SCHEMA_MAX_PARENT_TOKENS:
             continue
         schema_entries: list[tuple[_Token, list[_Token]]] = []
         for entry in _split_top_level_tokens(tokens[index + 1 : end]):
@@ -2451,6 +2443,9 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
         end = _matching_token_index(tokens, index + 2)
         if end != -1:
             assignments[token.raw] = tokens[index + 2 : end + 1]
+    lazy_catalogs = _lazy_commonjs_locale_catalogs(tokens, assignments)
+    if lazy_catalogs is not None:
+        return lazy_catalogs
     for registry in assignments.values():
         locale_targets: dict[str, str] = {}
         for entry in _split_top_level_tokens(registry[1:-1]):
@@ -2516,6 +2511,113 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
         locale, export_name = target_info
         result.setdefault(locale, (export_name, static_catalog))
     return result if "en" in result else {}
+
+
+def _lazy_commonjs_locale_catalogs(
+    tokens: list[_Token], assignments: dict[str, list[_Token]]
+) -> dict[str, EmbeddedLocaleCatalog] | None:
+    """Bind literal CommonJS dictionaries to one locale switch without executing them."""
+    modules: dict[str, list[_Token]] = {}
+    duplicates: set[str] = set()
+    for index in range(15, len(tokens) - 2):
+        if (
+            tokens[index].raw != "exports"
+            or tokens[index + 1].raw != "="
+            or tokens[index + 2].raw != "{"
+        ):
+            continue
+        prefix = [token.raw for token in tokens[index - 15 : index]]
+        if (
+            prefix[0] not in {"var", "let", "const", ","}
+            or prefix[2] != "="
+            or prefix[4] != "("
+            or prefix[5] != "("
+            or prefix[7] != ","
+            or prefix[9] != ")"
+            or prefix[10] != "="
+            or prefix[11] != ">"
+            or prefix[12] != "{"
+            or prefix[14] != "."
+            or prefix[8] != prefix[13]
+        ):
+            continue
+        loader = prefix[1]
+        if loader in modules:
+            duplicates.add(loader)
+            continue
+        end = _matching_token_index(tokens, index + 2)
+        if end < 0 or [row.raw for row in tokens[end + 1 : end + 3]] != ["}", ")"]:
+            continue
+        modules[loader] = tokens[index + 2 : end + 1]
+    for loader in duplicates:
+        modules.pop(loader, None)
+    if not modules:
+        return None
+    for index, token in enumerate(tokens[:-1]):
+        if token.raw != "switch" or tokens[index + 1].raw != "(":
+            continue
+        condition_end = _matching_token_index(tokens, index + 1)
+        if condition_end < 0 or condition_end + 1 >= len(tokens) or tokens[condition_end + 1].raw != "{":
+            continue
+        end = _matching_token_index(tokens, condition_end + 1)
+        if end < 0 or end - condition_end > 4096:
+            continue
+        locales: dict[str, list[_Token]] = {}
+        english_tokens: list[_Token] | None = None
+        invalid = False
+        for candidate in range(condition_end + 2, end):
+            if candidate + 4 >= len(tokens):
+                invalid = True
+                break
+            if (
+                tokens[candidate].raw == "default"
+                and [row.raw for row in tokens[candidate + 1 : candidate + 3]] == [":", "return"]
+                and tokens[candidate + 3].kind == "identifier"
+                and tokens[candidate + 4].raw in {";", "}"}
+            ):
+                english_tokens = assignments.get(tokens[candidate + 3].raw)
+            if tokens[candidate].raw != "case" or tokens[candidate + 1].kind != "literal" or tokens[candidate + 2].raw != ":":
+                continue
+            raw_locale = _decode_js_literal(tokens[candidate + 1].raw)
+            if raw_locale is None or re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?", raw_locale) is None:
+                invalid = True
+                break
+            locale = _canonical_locale(raw_locale)
+            stop = candidate + 3
+            while stop < end and tokens[stop].raw not in {"case", "default"}:
+                stop += 1
+            loaders = {
+                tokens[probe].raw
+                for probe in range(candidate + 3, stop - 2)
+                if tokens[probe].raw in modules
+                and tokens[probe + 1].raw == "("
+                and tokens[probe + 2].raw == ")"
+            }
+            if len(loaders) != 1 or locale in locales:
+                invalid = True
+                break
+            locales[locale] = modules[next(iter(loaders))]
+        if invalid or english_tokens is None or len(locales) < 3:
+            continue
+        english_references = [tokens for locale, tokens in locales.items() if locale.startswith("en-") or locale == "en"]
+        if not english_references:
+            continue
+        english: dict[LocalePath, str] = {}
+        reference: dict[LocalePath, str] = {}
+        _collect_static_locale_value(english_tokens, (), english)
+        _collect_static_locale_value(english_references[0], (), reference)
+        if not 3 <= len(english) <= MAX_LOCALE_ENTRIES or sum(
+            reference.get(path) == value for path, value in english.items()
+        ) / len(english) < 0.8:
+            continue
+        result: dict[str, EmbeddedLocaleCatalog] = {"en": ("locale:en", english)}
+        for locale, dictionary in locales.items():
+            parsed: dict[LocalePath, str] = {}
+            _collect_static_locale_value(dictionary, (), parsed)
+            if 1 <= len(parsed) <= MAX_LOCALE_ENTRIES:
+                result[locale] = (f"locale:{locale}", parsed)
+        return result
+    return None
 
 
 def _standalone_packed_locale_catalogs(

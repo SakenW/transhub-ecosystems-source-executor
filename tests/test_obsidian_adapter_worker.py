@@ -9,6 +9,49 @@ from adapters.obsidian.adapter_worker import build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_settings_schema_accepts_qualified_siblings_after_metadata(self) -> None:
+        bundle = (
+            'const settings={version:1,'
+            'hover:{name:"Colourless hover",desc:"Disable colour while hovering."},'
+            'drag:{name:"Colourless drag",desc:"Disable colour while dragging."},'
+            'select:{name:"Colourless selection",desc:"Disable colour while selected."}};'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertTrue({"Colourless hover", "Colourless drag", "Colourless selection"} <= sources)
+
+    def test_lazy_commonjs_locale_switch_binds_english_without_running_loaders(self) -> None:
+        bundle = """
+var baseline={settings:{name:"Larger symbols",desc:"Show bigger symbols",hint:"Keep %s backups"}};
+var english=commonJS((unused,module)=>{module.exports={settings:{name:"Larger symbols",desc:"Show bigger symbols",hint:"Keep %s backups"}}});
+var chinese=commonJS((unused,module)=>{module.exports={settings:{name:"大号符号",desc:"显示更大的符号",hint:"保留 %s 份备份"}}});
+var german=commonJS((unused,module)=>{module.exports={settings:{name:"Große Symbole",desc:"Größere Symbole anzeigen",hint:"%s Backups behalten"}}});
+function getText(locale){let promise;switch(locale){
+case "en-GB":promise=Promise.resolve().then(()=>interop(english(),1));break;
+case "zh":promise=Promise.resolve().then(()=>interop(chinese(),1));break;
+case "de":promise=Promise.resolve().then(()=>interop(german(),1));break;
+default:return baseline}
+return promise;}
+"""
+        manifest = b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}'
+        snapshot = json.loads(build_snapshot(manifest, bundle.encode("utf-8")))
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertIn("Larger symbols", strings)
+        self.assertIn("Keep %s backups", strings)
+        self.assertNotIn("Große Symbole", strings)
+        self.assertTrue(any(row["locale"] == "zh-CN" for row in snapshot["native_locale_coverage"]))
+        self.assertTrue(
+            any(evidence["symbol"].startswith("locale:en") for evidence in strings["Larger symbols"]["evidence"])
+        )
+        invalid = bundle.replace("module.exports", "other.exports")
+        rejected = json.loads(build_snapshot(manifest, invalid.encode("utf-8")))
+        self.assertEqual(rejected["native_locale_coverage"], [])
+
     def test_bounded_packed_native_catalog_exposes_english_source(self) -> None:
         chinese = 'var zh={title:"目录标题",help:"目录帮助",button:"保存更改"};'
         spanish = 'var es={title:"Título del catálogo",help:"Ayuda del catálogo",button:"Guardar cambios"};'
@@ -70,8 +113,8 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 19)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v19")
+        self.assertEqual(snapshot["contract_revision"], 20)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v20")
         self.assertTrue(
             {
                 "New template",
