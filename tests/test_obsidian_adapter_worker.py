@@ -170,8 +170,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 23)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v23")
+        self.assertEqual(snapshot["contract_revision"], 24)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v24")
         self.assertTrue(
             {
                 "New template",
@@ -195,6 +195,16 @@ return promise;}
         self.assertEqual(
             strings["Capture to active file"]["evidence"][0]["symbol"], "svelteForm"
         )
+
+    def test_choice_factory_does_not_borrow_unrelated_switch_brace(self) -> None:
+        bundle = 'switch (kind); const options = { case "Template": return "New template", case "Capture": return "New capture", case "Macro": return "New macro" };'
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        self.assertNotIn("New template", {row["source"] for row in snapshot["strings"]})
 
     def test_svelte_template_text_uses_real_static_nodes_without_html_patch_span(
         self,

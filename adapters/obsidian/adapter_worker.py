@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 23
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v23"
+CONTRACT_REVISION: Final = 24
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v24"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1530,17 +1530,16 @@ def _collect_choice_name_factories(
     """Collect a switch factory only when three or more returns are ``New …`` UI labels."""
 
     for index, token in enumerate(tokens):
-        if token.raw != "switch":
+        if token.kind != "identifier" or token.raw != "switch":
             continue
-        open_index = next(
-            (
-                candidate
-                for candidate in range(index + 1, len(tokens))
-                if tokens[candidate].raw == "{"
-            ),
-            -1,
-        )
-        if open_index < 0:
+        condition_open = index + 1
+        if condition_open >= len(tokens) or tokens[condition_open].raw != "(":
+            continue
+        condition_end = matching[condition_open]
+        if condition_end < 0:
+            continue
+        open_index = condition_end + 1
+        if open_index >= len(tokens) or tokens[open_index].raw != "{":
             continue
         end = matching[open_index] if open_index < len(matching) else -1
         if end < 0:
