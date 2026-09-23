@@ -9,18 +9,20 @@ ambient dependency, credential, or network access.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
 import unicodedata
+import zlib
 from array import array
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 18
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v18"
+CONTRACT_REVISION: Final = 19
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v19"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -2435,6 +2437,9 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
     tokens = _tokenize_javascript(bundle)
     if tokens is None:
         return {}
+    packed_catalogs = _standalone_packed_locale_catalogs(tokens)
+    if packed_catalogs is not None:
+        return packed_catalogs
     assignments: dict[str, list[_Token]] = {}
     for index, token in enumerate(tokens[:-2]):
         if (
@@ -2511,6 +2516,99 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
         locale, export_name = target_info
         result.setdefault(locale, (export_name, static_catalog))
     return result if "en" in result else {}
+
+
+def _standalone_packed_locale_catalogs(
+    tokens: list[_Token],
+) -> dict[str, EmbeddedLocaleCatalog] | None:
+    """Prove bounded packed locales before accepting their adjacent English source."""
+    for index, token in enumerate(tokens[:-2]):
+        if (
+            token.raw != "PLUGIN_LANGUAGES"
+            or tokens[index + 1].raw != "="
+            or tokens[index + 2].raw != "{"
+        ):
+            continue
+        end = _matching_token_index(tokens, index + 2)
+        if end < 0:
+            continue
+        packed_catalogs: dict[str, EmbeddedLocaleCatalog] = {}
+        for entry in _split_top_level_tokens(tokens[index + 3 : end]):
+            colon = _top_level_token_index(entry, ":")
+            if colon <= 0:
+                continue
+            raw_locale = _static_catalog_key(entry[:colon]) or ""
+            if re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", raw_locale) is None:
+                continue
+            locale = _canonical_locale(raw_locale)
+            value = entry[colon + 1 :]
+            if len(value) != 1 or value[0].kind != "literal":
+                continue
+            packed = _decode_js_literal(value[0].raw)
+            native = _decode_packed_locale_catalog(packed)
+            if native is not None:
+                packed_catalogs.setdefault(locale, (f"locale:{locale}", native))
+        if not packed_catalogs:
+            continue
+        for english_index in range(end + 1, len(tokens) - 2):
+            english_token = tokens[english_index]
+            if english_token.start - token.start > 1_000_000:
+                break
+            if (
+                english_token.raw != "en"
+                or english_index == 0
+                or tokens[english_index - 1].raw not in {"var", "let", "const"}
+                or tokens[english_index + 1].raw != "="
+                or tokens[english_index + 2].raw != "{"
+            ):
+                continue
+            english_end = _matching_token_index(tokens, english_index + 2)
+            if english_end < 0:
+                continue
+            english: dict[LocalePath, str] = {}
+            _collect_static_locale_value(tokens[english_index + 2 : english_end + 1], (), english)
+            if 3 <= len(english) <= MAX_LOCALE_ENTRIES:
+                return {**packed_catalogs, "en": ("locale:en", english)}
+    return None
+
+
+def _decode_packed_locale_catalog(packed: str | None) -> dict[LocalePath, str] | None:
+    if packed is None or len(packed) > 1_000_000:
+        return None
+    try:
+        compressed = base64.b64decode(packed, validate=True)
+        if len(compressed) > 1_000_000:
+            return None
+        inflater = zlib.decompressobj()
+        native_bytes = inflater.decompress(compressed, 2_000_001)
+        if (
+            len(native_bytes) > 2_000_000
+            or inflater.unconsumed_tail
+            or inflater.unused_data
+            or not inflater.eof
+        ):
+            return None
+        native_source = native_bytes.decode("utf-8")
+    except (ValueError, zlib.error, UnicodeError):
+        return None
+    native_tokens = _tokenize_javascript(native_source)
+    if native_tokens is None:
+        return None
+    native: dict[LocalePath, str] = {}
+    for native_index, native_token in enumerate(native_tokens[:-2]):
+        if (
+            native_token.kind != "identifier"
+            or native_tokens[native_index + 1].raw != "="
+            or native_tokens[native_index + 2].raw != "{"
+        ):
+            continue
+        native_end = _matching_token_index(native_tokens, native_index + 2)
+        if native_end >= 0:
+            _collect_static_locale_value(
+                native_tokens[native_index + 2 : native_end + 1], (), native
+            )
+            break
+    return native if 1 <= len(native) <= MAX_LOCALE_ENTRIES else None
 
 
 def _offset_location(source: str, offset: int) -> tuple[int, int]:
