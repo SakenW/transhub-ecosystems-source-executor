@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 29)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v29")
+        self.assertEqual(snapshot["contract_revision"], 30)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v30")
         self.assertTrue(
             {
                 "New template",
@@ -236,6 +236,34 @@ return promise;}
         evidence = strings["New choice"]["evidence"][0]
         self.assertEqual(evidence["symbol"], "svelteReactiveText")
         self.assertNotIn("literal_start", evidence)
+
+    def test_immutable_linked_settings_description_has_complete_variants(self) -> None:
+        bundle = "\n".join(
+            [
+                'var packageIntro="Bundle or import QuickAdd automations as reusable packages.";',
+                'const group={type:"group",heading:"Choices & packages",items:[{name:"Packages",desc:packageIntro,render:x=>x}]};',
+                'function packageDesc(empty){return this.descWithDocsLink(empty?`${packageIntro} Export becomes available once you have a choice. `:`${packageIntro} `,docs,"Learn more about packages")}',
+                'var internal="Internal connection setting";',
+                'function notVisible(empty){return this.descWithDocsLink(empty?`${internal} enabled`:`${internal} disabled`,docs)}',
+                'var mutable="Mutable description";mutable="Changed description";',
+                'const other={type:"group",heading:"Other",items:[{name:"Mutable",desc:mutable,render:x=>x}]};',
+                'function changed(empty){return this.descWithDocsLink(empty?`${mutable} first`:`${mutable} second`,docs)}',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        full = "Bundle or import QuickAdd automations as reusable packages. Export becomes available once you have a choice."
+        self.assertIn(full, strings)
+        self.assertIn("Bundle or import QuickAdd automations as reusable packages.", strings)
+        self.assertNotIn("Internal connection setting enabled", strings)
+        self.assertNotIn("Mutable description first", strings)
+        self.assertEqual(strings[full]["evidence"][0]["symbol"], "settingsComposedDocumentation")
+        self.assertNotIn("literal_start", strings[full]["evidence"][0])
 
     def test_internal_new_prefixed_switch_is_not_choice_ui_copy(self) -> None:
         bundle = 'function internalName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } const internal = internalName("Template");'

@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 29
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v29"
+CONTRACT_REVISION: Final = 30
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v30"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -872,7 +872,8 @@ def _collect_structured_matches(
                     ui_context_verified=index in ui_context_property_indices,
                 )
     _collect_settings_schema_entries(tokens, matching, collected)
-    _collect_settings_group_descriptors(tokens, matching, collected)
+    group_descriptions = _collect_settings_group_descriptors(tokens, matching, collected)
+    _collect_composed_settings_descriptions(tokens, matching, group_descriptions, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
     _collect_svelte_reactive_text(tokens, matching, collected)
@@ -1268,10 +1269,11 @@ def _collect_settings_group_descriptors(
     tokens: list[_Token],
     matching: Sequence[int],
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
-) -> None:
+) -> set[str]:
     """Extract declarative settings-group descriptors such as QuickAdd's
     ``{ type: "group", heading: "Choice picker", items: [...] }``."""
 
+    description_names: set[str] = set()
     for index, token in enumerate(tokens):
         if token.raw != "{":
             continue
@@ -1291,6 +1293,13 @@ def _collect_settings_group_descriptors(
         descriptor_key = tokens[index + 1] if index + 1 < len(tokens) else token
         _add_settings_schema_value(collected, heading_value, descriptor_key)
         for item in items:
+            description_reference = _static_object_property(item, "desc")
+            if (
+                description_reference is not None
+                and len(description_reference) == 1
+                and description_reference[0].kind == "identifier"
+            ):
+                description_names.add(description_reference[0].raw)
             for property_name in ("name", "desc", "description"):
                 expression = _static_object_string_property(item, property_name)
                 if expression is not None:
@@ -1307,6 +1316,85 @@ def _collect_settings_group_descriptors(
                             "settingsDocumentation",
                         )
             _collect_settings_dropdown_options(item, descriptor_key, collected)
+    return description_names
+
+
+def _collect_composed_settings_descriptions(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    description_names: set[str],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Fold only immutable settings copy in linked documentation branches."""
+
+    if not description_names:
+        return
+    assignments: dict[str, int] = {}
+    constants: dict[str, str] = {}
+    for index in range(1, len(tokens) - 2):
+        name = tokens[index]
+        if (
+            name.kind != "identifier"
+            or name.raw not in description_names
+            or tokens[index + 1].raw != "="
+        ):
+            continue
+        assignments[name.raw] = assignments.get(name.raw, 0) + 1
+        if tokens[index - 1].raw not in {"var", "let", "const"}:
+            continue
+        if tokens[index + 2].kind != "literal":
+            continue
+        value = _decode_js_literal(tokens[index + 2].raw)
+        if value is not None:
+            constants[name.raw] = value
+    for index in range(len(tokens) - 1):
+        call = tokens[index]
+        if call.raw != "descWithDocsLink" or tokens[index + 1].raw != "(":
+            continue
+        parsed = _read_call_arguments(tokens, index + 1, matching)
+        if parsed is None or not parsed[0]:
+            continue
+        expression = parsed[0][0]
+        question = _top_level_token_index(expression, "?")
+        colon_offset = (
+            _top_level_token_index(expression[question + 1 :], ":")
+            if question >= 0
+            else -1
+        )
+        colon = question + 1 + colon_offset if colon_offset >= 0 else -1
+        if question < 0 or colon != question + 2 or len(expression) != colon + 2:
+            continue
+        for variant in (expression[question + 1], expression[colon + 1]):
+            if variant.kind != "literal" or not variant.raw.startswith("`"):
+                continue
+            body = variant.raw[1:-1]
+            for name, value in constants.items():
+                if assignments.get(name) != 1:
+                    continue
+                marker = "${" + name + "}"
+                at = body.find(marker)
+                if at < 0 or body.find("${") != at or "${" in body[at + len(marker) :]:
+                    continue
+                prefix = _decode_js_literal("`" + body[:at] + "`")
+                suffix = _decode_js_literal("`" + body[at + len(marker) :] + "`")
+                if prefix is None or suffix is None:
+                    continue
+                text = prefix + value + suffix
+                _add_candidate(
+                    collected,
+                    text,
+                    "ui-property",
+                    {
+                        "origin": "ui-property",
+                        "strategy": "structured",
+                        "symbol": "settingsComposedDocumentation",
+                        "offset": variant.start,
+                        "line": variant.line,
+                        "column": variant.column,
+                    },
+                    static_probe=text,
+                    ui_context_verified=True,
+                )
 
 
 def _collect_settings_dropdown_options(
