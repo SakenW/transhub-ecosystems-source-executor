@@ -158,7 +158,7 @@ return promise;}
                 'function choiceName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } }',
                 'button.onClick(() => editor.onAddChoice(choiceName(kind), kind));',
                 "const markup = q('<div><h4>Location</h4><!></div>');",
-                'const group = { type: "group", heading: "Choice picker", items: [{ name: "New note from template", desc: docs("Collect a choice\\\'s inputs in one form before it runs.", ref), control: { type: "dropdown", options: { bottom: "Show at the bottom (keeps your top choice first)", top: "Show at the top", off: "Hide" } } }] };',
+                'const group = { type: "group", heading: "Choice picker", items: [{ name: "New note from template", desc: this.descWithDocsLink("Collect a choice\\\'s inputs in one form before it runs.", ref), control: { type: "dropdown", options: { bottom: "Show at the bottom (keeps your top choice first)", top: "Show at the top", off: "Hide" } } }] };',
                 'mount(node, { name: "Capture to active file", desc: "Capture into whichever note is open when the choice runs, instead of a fixed target.", control: value => value });',
                 'mount(node, { name: "Create file if it doesn\\\'t exist", control: value => value });',
                 'mount(node, { name: "Behavior", heading: !0 });',
@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 26)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v26")
+        self.assertEqual(snapshot["contract_revision"], 27)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v27")
         self.assertTrue(
             {
                 "New template",
@@ -233,6 +233,18 @@ return promise;}
         self.assertNotIn("mi", sources)
         self.assertNotIn("months", sources)
         self.assertIn("Visible setting", sources)
+
+    def test_arbitrary_helper_first_literal_is_not_settings_copy(self) -> None:
+        bundle = 'const group = { type: "group", heading: "Visible group", items: [{ name: "Visible setting", desc: internalHelper("Internal configuration key", ref), control: { type: "toggle" } }] };'
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertIn("Visible setting", sources)
+        self.assertNotIn("Internal configuration key", sources)
 
     def test_shadowed_choice_factory_name_is_not_ui_proof(self) -> None:
         bundle = 'function choiceName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } function choiceName(other) { return other; } editor.onAddChoice(choiceName(kind), kind);'

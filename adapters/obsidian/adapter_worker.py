@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 26
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v26"
+CONTRACT_REVISION: Final = 27
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v27"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1613,15 +1613,15 @@ def _static_object_property(
 
 
 def _first_literal_argument(value: list[_Token] | None) -> list[_Token] | None:
-    if value is None:
+    # Only the observed settings-description wrapper proves the literal is UI.
+    if (
+        value is None
+        or len(value) < 5
+        or [part.raw for part in value[:4]]
+        != ["this", ".", "descWithDocsLink", "("]
+    ):
         return None
-    try:
-        open_index = next(
-            index for index, token in enumerate(value) if token.raw == "("
-        )
-    except StopIteration:
-        return None
-    first = value[open_index + 1] if open_index + 1 < len(value) else None
+    first = value[4]
     return [first] if first is not None and first.kind == "literal" else None
 
 
