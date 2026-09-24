@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 28)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v28")
+        self.assertEqual(snapshot["contract_revision"], 29)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v29")
         self.assertTrue(
             {
                 "New template",
@@ -206,6 +206,36 @@ return promise;}
             )
         )
         self.assertNotIn("New template", {row["source"] for row in snapshot["strings"]})
+
+    def test_static_reactive_choice_labels_require_svelte_text_node_sink(self) -> None:
+        bundle = "\n".join(
+            [
+                'let choiceLabel=P(()=>compact()?"Add choice":"New choice"),folderLabel=P(()=>compact()?"Add folder":"New folder");',
+                'var choiceText=de(choiceNode,!0),folderText=de(folderNode,!0);',
+                'ae(()=>{ue(choiceText,h(choiceLabel));ue(folderText,h(folderLabel))});',
+                'let hidden=P(()=>compact()?"Internal enabled":"Internal disabled");',
+                'var wrong=other(node,!0);log(h(hidden));',
+                'function first(){let cross=P(()=>flag()?"Private yes":"Private no");}',
+                'function second(){var text=de(node,!0);ae(()=>{ue(text,h(cross))})}',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"quickadd","name":"QuickAdd","version":"2.25.0","description":"Quickly add new pages or content to your vault."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertTrue(
+            {"Add choice", "New choice", "Add folder", "New folder"}.issubset(strings)
+        )
+        self.assertNotIn("Internal enabled", strings)
+        self.assertNotIn("Internal disabled", strings)
+        self.assertNotIn("Private yes", strings)
+        self.assertNotIn("Private no", strings)
+        evidence = strings["New choice"]["evidence"][0]
+        self.assertEqual(evidence["symbol"], "svelteReactiveText")
+        self.assertNotIn("literal_start", evidence)
 
     def test_internal_new_prefixed_switch_is_not_choice_ui_copy(self) -> None:
         bundle = 'function internalName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } const internal = internalName("Template");'

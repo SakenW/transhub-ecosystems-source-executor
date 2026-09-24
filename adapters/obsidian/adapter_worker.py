@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 28
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v28"
+CONTRACT_REVISION: Final = 29
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v29"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -875,6 +875,7 @@ def _collect_structured_matches(
     _collect_settings_group_descriptors(tokens, matching, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
+    _collect_svelte_reactive_text(tokens, matching, collected)
     _collect_choice_name_factories(tokens, matching, collected)
     _collect_grouped_ui_text_dictionary(tokens, matching, collected)
     return True
@@ -1451,6 +1452,116 @@ def _collect_svelte_template_text(
                 static_probe=text,
                 ui_context_verified=True,
             )
+
+
+def _collect_svelte_reactive_text(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Require a static reactive selector and its direct Svelte text-node sink."""
+
+    braces: list[int] = []
+    for index in range(1, len(tokens) - 8):
+        store = tokens[index]
+        if store.raw == "{":
+            braces.append(index)
+        elif store.raw == "}":
+            braces.pop()
+        if (
+            store.kind != "identifier"
+            or tokens[index - 1].raw not in {"let", "const", "var", ","}
+            or tokens[index + 1].raw != "="
+            or tokens[index + 2].kind != "identifier"
+            or tokens[index + 3].raw != "("
+            or tokens[index + 4].raw != "("
+            or tokens[index + 5].raw != ")"
+            or tokens[index + 6].raw != "="
+            or tokens[index + 7].raw != ">"
+        ):
+            continue
+        end = matching[index + 3]
+        if end < 0 or end - index > 64:
+            continue
+        body = tokens[index + 8 : end]
+        question = _top_level_token_index(body, "?")
+        colon_offset = (
+            _top_level_token_index(body[question + 1 :], ":")
+            if question >= 0
+            else -1
+        )
+        colon = question + 1 + colon_offset if colon_offset >= 0 else -1
+        if (
+            question < 0
+            or colon != question + 2
+            or len(body) != colon + 2
+        ):
+            continue
+        values = (body[question + 1], body[colon + 1])
+        decoded = [_decode_js_literal(value.raw) for value in values]
+        if any(value.kind != "literal" for value in values) or any(
+            value is None for value in decoded
+        ):
+            continue
+        scope_end = matching[braces[-1]] if braces else len(tokens)
+        if not _has_svelte_reactive_text_sink(tokens, store.raw, end + 1, scope_end):
+            continue
+        for value, text in zip(values, decoded, strict=True):
+            if text is None:
+                continue
+            _add_candidate(
+                collected,
+                text,
+                "ui-property",
+                {
+                    "origin": "ui-property",
+                    "strategy": "structured",
+                    "symbol": "svelteReactiveText",
+                    "offset": value.start,
+                    "line": value.line,
+                    "column": value.column,
+                },
+                static_probe=text,
+                ui_context_verified=True,
+            )
+
+
+def _has_svelte_reactive_text_sink(
+    tokens: list[_Token], store: str, start: int, scope_end: int
+) -> bool:
+    nodes: set[str] = set()
+    end = min(len(tokens), start + 512, scope_end)
+    for index in range(start, end - 8):
+        name = tokens[index]
+        if name.kind != "identifier":
+            continue
+        if (
+            tokens[index + 1].raw == "="
+            and tokens[index + 2].kind == "identifier"
+            and tokens[index + 3].raw == "("
+            and tokens[index + 4].kind == "identifier"
+            and tokens[index + 5].raw == ","
+            and (
+                tokens[index + 6].raw == "!"
+                and tokens[index + 7].raw == "0"
+                and tokens[index + 8].raw == ")"
+                or tokens[index + 6].raw == "true"
+                and tokens[index + 7].raw == ")"
+            )
+        ):
+            nodes.add(name.raw)
+        if (
+            tokens[index + 1].raw == "("
+            and tokens[index + 2].raw in nodes
+            and tokens[index + 3].raw == ","
+            and tokens[index + 4].kind == "identifier"
+            and tokens[index + 5].raw == "("
+            and tokens[index + 6].raw == store
+            and tokens[index + 7].raw == ")"
+            and tokens[index + 8].raw == ")"
+        ):
+            return True
+    return False
 
 
 def _static_svelte_template_text_nodes(template: str) -> list[str]:
