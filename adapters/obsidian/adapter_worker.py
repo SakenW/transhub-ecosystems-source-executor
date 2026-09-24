@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 27
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v27"
+CONTRACT_REVISION: Final = 28
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v28"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1363,6 +1363,23 @@ def _collect_svelte_form_descriptors(
         end = matching[index] if index < len(matching) else -1
         if end < 0 or end - index > SETTINGS_SCHEMA_MAX_ENTRY_TOKENS:
             continue
+        first_call_argument = (
+            index >= 2
+            and tokens[index - 1].raw == "("
+            and tokens[index - 2].kind == "identifier"
+        )
+        second_call_argument = (
+            index >= 4
+            and tokens[index - 1].raw == ","
+            and tokens[index - 2].kind == "identifier"
+            and tokens[index - 3].raw == "("
+            and tokens[index - 4].kind == "identifier"
+        )
+        direct_call = (
+            (first_call_argument or second_call_argument)
+            and end + 1 < len(tokens)
+            and tokens[end + 1].raw == ")"
+        )
         object_tokens = tokens[index : end + 1]
         name = _static_object_string_property(object_tokens, "name")
         if name is None:
@@ -1376,7 +1393,19 @@ def _collect_svelte_form_descriptors(
             _static_object_property(object_tokens, property_name) is not None
             for property_name in ("control", "$$slots")
         )
-        if not is_heading and not is_interactive:
+        control = _static_object_property(object_tokens, "control")
+        control_object = _strip_wrapping_parentheses(control or [])
+        control_type = (
+            _static_object_string_property(control_object, "type")
+            if control_object and control_object[0].raw == "{"
+            else None
+        )
+        recognized_control = control_type is not None and _decode_js_literal(
+            control_type[0].raw
+        ) in {"toggle", "text", "number", "folder", "dropdown"}
+        if (not direct_call and not recognized_control) or (
+            not is_heading and not is_interactive
+        ):
             continue
         descriptor_key = tokens[index + 1] if index + 1 < len(tokens) else token
         _add_settings_schema_value(collected, name, descriptor_key, "svelteForm")

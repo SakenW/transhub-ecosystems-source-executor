@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 27)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v27")
+        self.assertEqual(snapshot["contract_revision"], 28)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v28")
         self.assertTrue(
             {
                 "New template",
@@ -232,6 +232,26 @@ return promise;}
         sources = {row["source"] for row in snapshot["strings"]}
         self.assertNotIn("mi", sources)
         self.assertNotIn("months", sources)
+        self.assertIn("Visible setting", sources)
+
+    def test_name_and_control_need_a_component_call(self) -> None:
+        bundle = (
+            'const internal = { name: "Internal control key", control: value => value };'
+            'const hidden = { name: "Network config key", control: { type: "network", key: "network" } };'
+            'const items = [{ name: "Typed setting", desc: "Visible setting description", control: { type: "toggle", key: "enabled" } }];'
+            'mount(row, { name: "Visible setting", control: value => value });'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertNotIn("Internal control key", sources)
+        self.assertNotIn("Network config key", sources)
+        self.assertIn("Typed setting", sources)
+        self.assertIn("Visible setting description", sources)
         self.assertIn("Visible setting", sources)
 
     def test_arbitrary_helper_first_literal_is_not_settings_copy(self) -> None:
