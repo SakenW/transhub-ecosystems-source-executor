@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 25)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v25")
+        self.assertEqual(snapshot["contract_revision"], 26)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v26")
         self.assertTrue(
             {
                 "New template",
@@ -216,6 +216,23 @@ return promise;}
             )
         )
         self.assertNotIn("New template", {row["source"] for row in snapshot["strings"]})
+
+    def test_children_only_ast_or_jsx_name_is_not_a_setting_label(self) -> None:
+        bundle = (
+            'new MathNode({ name: "mi", attributes: {}, children: [], value: "x" });'
+            'jsx(Dropdown, { name: "months", children: options, value: currentMonth });'
+            'mount(row, { name: "Visible setting", control: value => value });'
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertNotIn("mi", sources)
+        self.assertNotIn("months", sources)
+        self.assertIn("Visible setting", sources)
 
     def test_shadowed_choice_factory_name_is_not_ui_proof(self) -> None:
         bundle = 'function choiceName(kind) { switch (kind) { case "Template": return "New template"; case "Capture": return "New capture"; case "Macro": return "New macro"; } } function choiceName(other) { return other; } editor.onAddChoice(choiceName(kind), kind);'

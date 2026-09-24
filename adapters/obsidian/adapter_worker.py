@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 25
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v25"
+CONTRACT_REVISION: Final = 26
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v26"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -1374,7 +1374,7 @@ def _collect_svelte_form_descriptors(
         )
         is_interactive = any(
             _static_object_property(object_tokens, property_name) is not None
-            for property_name in ("control", "children", "$$slots")
+            for property_name in ("control", "$$slots")
         )
         if not is_heading and not is_interactive:
             continue
