@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 34
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v34"
+CONTRACT_REVISION: Final = 35
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v35"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -904,6 +904,8 @@ def _collect_structured_matches(
     _collect_composed_settings_descriptions(tokens, matching, group_descriptions, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
+    _collect_svelte_dom_attribute_labels(tokens, matching, collected)
+    _collect_svelte_return_text(bundle, tokens, matching, collected)
     _collect_svelte_reactive_text(tokens, matching, collected)
     _collect_choice_name_factories(tokens, matching, collected)
     _collect_indexed_error_messages(tokens, matching, collected)
@@ -1770,6 +1772,186 @@ def _collect_svelte_template_text(
                     "column": literal.column,
                 },
                 static_probe=text,
+                ui_context_verified=True,
+            )
+
+
+def _collect_svelte_dom_attribute_labels(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Read static labels only through a unique helper proven to call setAttribute."""
+
+    helpers: set[str] = set()
+    declarations: dict[str, int] = {}
+    for index in range(len(tokens) - 4):
+        if (
+            tokens[index].raw != "function"
+            or tokens[index + 1].kind != "identifier"
+            or tokens[index + 2].raw != "("
+        ):
+            continue
+        name = tokens[index + 1].raw
+        declarations[name] = declarations.get(name, 0) + 1
+        close = matching[index + 2]
+        open_index = close + 1
+        end = matching[open_index] if 0 <= open_index < len(tokens) else -1
+        if (
+            close < 0
+            or open_index >= len(tokens)
+            or tokens[open_index].raw != "{"
+            or end < 0
+            or end - open_index > 128
+        ):
+            continue
+        params = _split_top_level_tokens(tokens[index + 3 : close])
+        if len(params) != 3 or any(
+            len(part) != 1 or part[0].kind != "identifier" for part in params
+        ):
+            continue
+        node, attribute, value = (part[0].raw for part in params)
+        if _has_token_sequence(
+            tokens[open_index + 1 : end],
+            (node, ".", "setAttribute", "(", attribute, ",", value, ")"),
+        ):
+            helpers.add(name)
+    helpers = {name for name in helpers if declarations[name] == 1}
+    if not helpers:
+        return
+    visible_attributes = {"aria-label", "title", "placeholder"}
+    for index in range(1, len(tokens) - 1):
+        if (
+            tokens[index].raw not in helpers
+            or tokens[index - 1].raw == "."
+            or tokens[index + 1].raw != "("
+        ):
+            continue
+        parsed = _read_call_arguments(tokens, index + 1, matching)
+        if parsed is None:
+            continue
+        args, _ = parsed
+        if len(args) != 3:
+            continue
+        receiver, attribute, value = args
+        if (
+            len(receiver) != 1
+            or receiver[0].kind != "identifier"
+            or len(attribute) != 1
+            or len(value) != 1
+            or value[0].kind != "literal"
+            or _decode_js_literal(attribute[0].raw) not in visible_attributes
+        ):
+            continue
+        _add_settings_schema_value(collected, value, value[0], "svelteDomAttribute")
+
+
+def _collect_svelte_return_text(
+    bundle: str,
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Require an instance-array binding and an annotated Svelte text-node sink."""
+
+    markers: dict[str, set[int]] = {}
+    rendered = re.compile(
+        r"\b(?:let|var|const)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+        r"/\*([A-Za-z_$][A-Za-z0-9_$]*)\*/\s*ctx\[(\d{1,2})\]"
+        r"\([^)]{1,256}\)\s*\+\s*(?:\"\"|'')"
+    )
+    for match in rendered.finditer(bundle):
+        variable, helper, raw_index = match.groups()
+        low = 0
+        high = len(tokens)
+        while low < high:
+            middle = (low + high) // 2
+            if tokens[middle].start < match.start():
+                low = middle + 1
+            else:
+                high = middle
+        if low >= len(tokens) or tokens[low].start != match.start():
+            continue
+        scope_end = -1
+        for index in range(low - 1, max(-1, low - 10_001), -1):
+            if (
+                index > 0
+                and tokens[index].raw == "{"
+                and tokens[index - 1].raw == ")"
+                and matching[index] > low
+            ):
+                scope_end = matching[index]
+                break
+        if scope_end < 0 or not _has_token_sequence(
+            tokens[low:scope_end], ("text", "(", variable, ")")
+        ):
+            continue
+        markers.setdefault(helper, set()).add(int(raw_index))
+    if not markers:
+        return
+    declarations: dict[str, list[_Token]] = {}
+    counts: dict[str, int] = {}
+    bindings: dict[str, int] = {}
+    for index in range(len(tokens) - 2):
+        if (
+            tokens[index].raw == "function"
+            and tokens[index + 1].kind == "identifier"
+            and tokens[index + 2].raw == "("
+        ):
+            name = tokens[index + 1].raw
+            if name in markers:
+                counts[name] = counts.get(name, 0) + 1
+                close = matching[index + 2]
+                open_index = close + 1
+                end = matching[open_index] if 0 <= open_index < len(tokens) else -1
+                if (
+                    close >= 0
+                    and open_index < len(tokens)
+                    and tokens[open_index].raw == "{"
+                    and 0 <= end - open_index <= 2048
+                ):
+                    declarations[name] = tokens[open_index + 1 : end]
+        if tokens[index].raw != "return" or tokens[index + 1].raw != "[":
+            continue
+        end = matching[index + 1]
+        if end < 0 or end - index > 128:
+            continue
+        parts = _split_top_level_tokens(tokens[index + 2 : end])
+        for name, indexes in markers.items():
+            for context_index in indexes:
+                if (
+                    context_index < len(parts)
+                    and len(parts[context_index]) == 1
+                    and parts[context_index][0].raw == name
+                ):
+                    bindings[name] = bindings.get(name, 0) + 1
+    for name, body in declarations.items():
+        if counts.get(name) != 1 or bindings.get(name) != 1:
+            continue
+        values: dict[str, _Token] = {}
+        for index in range(len(body) - 1):
+            if body[index].raw != "return" or body[index + 1].kind != "literal":
+                continue
+            literal = body[index + 1]
+            value = _decode_js_literal(literal.raw)
+            if value is not None:
+                values[value] = literal
+        if not 3 <= len(values) <= 64:
+            continue
+        for value, literal in values.items():
+            _add_candidate(
+                collected,
+                value,
+                "ui-property",
+                {
+                    "origin": "ui-property",
+                    "strategy": "structured",
+                    "symbol": "svelteReturnText",
+                    "offset": literal.start,
+                    "line": literal.line,
+                    "column": literal.column,
+                },
+                static_probe=value,
                 ui_context_verified=True,
             )
 

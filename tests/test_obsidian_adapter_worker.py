@@ -9,6 +9,73 @@ from adapters.obsidian.adapter_worker import _decode_js_literal, build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_svelte_dom_attributes_require_a_proven_static_sink(self) -> None:
+        bundle = "\n".join(
+            [
+                'function attr(node,attribute,value){if(value==null)node.removeAttribute(attribute);else node.setAttribute(attribute,value)}',
+                'function create(){button=element("button");attr(button,"aria-label","Move Status Bar Item Down");attr(button,"title","Remove Status Bar Item");attr(button,"data-key","Internal configuration key")}',
+                'function internal(node,attribute,value){store.set(attribute,value)}',
+                'internal(button,"aria-label","Internal command key");',
+                'attr(button,"aria-label",dynamicLabel);',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertIn("Move Status Bar Item Down", strings)
+        self.assertIn("Remove Status Bar Item", strings)
+        self.assertNotIn("Internal configuration key", strings)
+        self.assertNotIn("Internal command key", strings)
+        self.assertEqual(
+            strings["Move Status Bar Item Down"]["evidence"][0]["symbol"],
+            "svelteDomAttribute",
+        )
+
+    def test_shadowed_svelte_attribute_helper_is_not_ui_proof(self) -> None:
+        bundle = 'function attr(node,name,value){node.setAttribute(name,value)} function attr(node,name,value){store.set(name,value)} attr(button,"aria-label","Private workflow key");'
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        self.assertNotIn(
+            "Private workflow key", {row["source"] for row in snapshot["strings"]}
+        )
+
+    def test_svelte_return_labels_require_instance_slot_and_text_node(self) -> None:
+        helper = 'function metricToString(kind){switch(kind){case 1:return "Words in Note";case 2:return "Chars in Note";case 3:return "Total Notes";default:return "Select Options"}}'
+        bound = 'function instance(){return [plugin,items,altItems,metricToString]}'
+        visible = 'function block(ctx){let label=/*metricToString*/ ctx[3](ctx[0])+"";let node;return {c(){node=text(label)}}}'
+
+        def sources(bundle: str) -> dict[str, dict[str, object]]:
+            snapshot = json.loads(
+                build_snapshot(
+                    b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                    bundle.encode("utf-8"),
+                )
+            )
+            return {row["source"]: row for row in snapshot["strings"]}
+
+        accepted = sources("\n".join((helper, bound, visible)))
+        self.assertTrue(
+            {"Words in Note", "Chars in Note", "Total Notes", "Select Options"}
+            <= accepted.keys()
+        )
+        self.assertEqual(
+            accepted["Words in Note"]["evidence"][0]["symbol"], "svelteReturnText"
+        )
+        for hidden in (
+            'function block(ctx){let label=/*metricToString*/ ctx[3](ctx[0])+"";log(label)}',
+            'function block(ctx){let label=/*metricToString*/ ctx[2](ctx[0])+"";let node;return {c(){node=text(label)}}}',
+            'function block(ctx){let label=/*metricToString*/ ctx[3](ctx[0])+"";log(label)} function other(){let node=text(label)}',
+        ):
+            self.assertNotIn("Words in Note", sources("\n".join((helper, bound, hidden))))
+        self.assertNotIn("Words in Note", sources("\n".join((helper, helper, bound, visible))))
     def test_large_function_reference_is_not_mistaken_for_settings_entry(self) -> None:
         functions = ",".join(f"f{index}:{{name:'function {index}'}}" for index in range(140))
         bundle = (
@@ -195,8 +262,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 34)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v34")
+        self.assertEqual(snapshot["contract_revision"], 35)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v35")
         self.assertTrue(
             {
                 "New template",
