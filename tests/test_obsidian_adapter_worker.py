@@ -5,7 +5,7 @@ import json
 import unittest
 import zlib
 
-from adapters.obsidian.adapter_worker import build_snapshot
+from adapters.obsidian.adapter_worker import _decode_js_literal, build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 31)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v31")
+        self.assertEqual(snapshot["contract_revision"], 32)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v32")
         self.assertTrue(
             {
                 "New template",
@@ -218,6 +218,20 @@ return promise;}
         )
         rejected = {row["source"] for row in json.loads(build_snapshot(manifest, negative.encode()))["strings"]}
         self.assertNotIn(warning, rejected)
+
+    def test_es_unicode_code_point_escape_matches_client_and_rejects_invalid_scalars(self) -> None:
+        self.assertEqual(
+            _decode_js_literal(r'"Text and Highlight Colors \u{1F9EA}"'),
+            "Text and Highlight Colors 🧪",
+        )
+        self.assertEqual(_decode_js_literal(r'"\uD83D\uDE80 Launch"'), "🚀 Launch")
+        for literal in (r'"\u{}"', r'"\u{D800}"', r'"\u{110000}"', r'"\u{1234567}"', r'"\uD83D"'):
+            self.assertIsNone(_decode_js_literal(literal))
+        snapshot = json.loads(build_snapshot(
+            b'{"id":"make-md","name":"make.md","version":"1.3.5","description":"Organize notes."}',
+            r'setting.setName("Text and Highlight Colors \u{1F9EA}");'.encode(),
+        ))
+        self.assertIn("Text and Highlight Colors 🧪", {row["source"] for row in snapshot["strings"]})
 
     def test_choice_factory_does_not_borrow_unrelated_switch_brace(self) -> None:
         bundle = 'switch (kind); const options = { case "Template": return "New template", case "Capture": return "New capture", case "Macro": return "New macro" };'

@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 31
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v31"
+CONTRACT_REVISION: Final = 32
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v32"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -533,12 +533,36 @@ def _decode_js_literal(literal: str) -> str | None:
         if escaped in simple:
             output.append(simple[escaped])
             continue
+        if escaped == "u" and index < len(body) and body[index] == "{":
+            close = body.find("}", index + 1)
+            code = body[index + 1 : close] if close >= 0 else ""
+            if not re.fullmatch(r"[0-9a-fA-F]{1,6}", code):
+                return None
+            value = int(code, 16)
+            if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+                return None
+            output.append(chr(value))
+            index = close + 1
+            continue
         if escaped in {"x", "u"}:
             width = 2 if escaped == "x" else 4
             code = body[index : index + width]
             if len(code) != width or not re.fullmatch(r"[0-9a-fA-F]+", code):
                 return None
             value = int(code, 16)
+            if escaped == "u" and 0xD800 <= value <= 0xDBFF:
+                low_start = index + width
+                if body[low_start : low_start + 2] != "\\u":
+                    return None
+                low_code = body[low_start + 2 : low_start + 6]
+                if not re.fullmatch(r"[0-9a-fA-F]{4}", low_code):
+                    return None
+                low = int(low_code, 16)
+                if not 0xDC00 <= low <= 0xDFFF:
+                    return None
+                output.append(chr(0x10000 + ((value - 0xD800) << 10) + low - 0xDC00))
+                index = low_start + 6
+                continue
             if 0xD800 <= value <= 0xDFFF:
                 return None
             output.append(chr(value))
