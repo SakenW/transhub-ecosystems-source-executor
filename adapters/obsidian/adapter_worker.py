@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 35
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v35"
+CONTRACT_REVISION: Final = 36
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v36"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -897,6 +897,7 @@ def _collect_structured_matches(
                     ui_context_verified=index in ui_context_property_indices,
                 )
     _collect_settings_schema_entries(tokens, matching, collected)
+    _collect_plugin_setting_tab_definitions(tokens, matching, collected)
     linked_description_helpers = _find_linked_description_helpers(tokens, matching)
     group_descriptions = _collect_settings_group_descriptors(
         tokens, matching, collected, linked_description_helpers
@@ -1453,6 +1454,150 @@ def _collect_settings_group_descriptors(
                         )
             _collect_settings_dropdown_options(item, descriptor_key, collected)
     return description_names
+
+
+def _collect_plugin_setting_tab_definitions(
+    tokens: list[_Token],
+    matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Read descriptors returned by a proven PluginSettingTab subclass."""
+
+    for index in range(len(tokens) - 1):
+        if (
+            tokens[index].raw != "PluginSettingTab"
+            or tokens[index + 1].raw != "{"
+            or not any(token.raw == "extends" for token in tokens[max(0, index - 5) : index])
+            or not any(token.raw == "class" for token in tokens[max(0, index - 10) : index])
+        ):
+            continue
+        class_end = matching[index + 1]
+        if class_end < 0 or class_end - index > SETTINGS_SCHEMA_MAX_PARENT_TOKENS:
+            continue
+        helpers: set[str] = set()
+        method_counts: dict[str, int] = {}
+        definitions: list[list[_Token]] | None = None
+        method = index + 2
+        while method + 2 < class_end:
+            if tokens[method].kind != "identifier" or tokens[method + 1].raw != "(":
+                method += 1
+                continue
+            close = matching[method + 1]
+            open_index = close + 1
+            end = matching[open_index] if 0 <= open_index < len(tokens) else -1
+            if (
+                close < 0
+                or open_index >= len(tokens)
+                or tokens[open_index].raw != "{"
+                or end < 0
+                or end > class_end
+            ):
+                method += 1
+                continue
+            method_name = tokens[method].raw
+            method_counts[method_name] = method_counts.get(method_name, 0) + 1
+            if tokens[method].raw == "getSettingDefinitions":
+                cursor = open_index + 1
+                while cursor + 1 < end:
+                    if tokens[cursor].raw == "{" and matching[cursor] > cursor:
+                        cursor = matching[cursor] + 1
+                        continue
+                    if tokens[cursor].raw != "return" or tokens[cursor + 1].raw != "[":
+                        cursor += 1
+                        continue
+                    array_end = matching[cursor + 1]
+                    if cursor < array_end < end:
+                        definitions = _split_top_level_tokens(tokens[cursor + 2 : array_end])
+                    break
+            else:
+                params = _split_top_level_tokens(tokens[method + 2 : close])
+                if (
+                    len(params) >= 2
+                    and len(params[0]) == 1
+                    and len(params[1]) == 1
+                    and params[0][0].kind == "identifier"
+                    and params[1][0].kind == "identifier"
+                ):
+                    cursor = open_index + 1
+                    while cursor + 1 < end:
+                        if tokens[cursor].raw == "{" and matching[cursor] > cursor:
+                            cursor = matching[cursor] + 1
+                            continue
+                        if tokens[cursor].raw != "return" or tokens[cursor + 1].raw != "{":
+                            cursor += 1
+                            continue
+                        object_end = matching[cursor + 1]
+                        if object_end < 0 or object_end >= end:
+                            break
+                        object_tokens = tokens[cursor + 1 : object_end + 1]
+                        name = _static_object_property(object_tokens, "name")
+                        description = _static_object_property(object_tokens, "desc")
+                        if (
+                            name is not None
+                            and len(name) == 1
+                            and name[0].raw == params[0][0].raw
+                            and description is not None
+                            and len(description) == 1
+                            and description[0].raw == params[1][0].raw
+                            and _static_object_property(object_tokens, "render") is not None
+                        ):
+                            helpers.add(tokens[method].raw)
+                        break
+            method = end + 1
+        if method_counts.get("getSettingDefinitions") != 1:
+            definitions = None
+        helpers = {name for name in helpers if method_counts.get(name) == 1}
+        for item in definitions or []:
+            if not item or item[0].raw != "{" or _matching_token_index(item, 0) != len(item) - 1:
+                continue
+            name = _static_object_string_property(item, "name")
+            if name is not None and (
+                _static_object_property(item, "render") is not None
+                or _static_object_property(item, "control") is not None
+            ):
+                _add_settings_schema_value(collected, name, name[0], "pluginSettingTab")
+                description = _static_object_string_property(item, "desc")
+                if description is not None:
+                    _add_settings_schema_value(
+                        collected, description, description[0], "pluginSettingTab"
+                    )
+            type_value = _static_object_string_property(item, "type")
+            heading = _static_object_string_property(item, "heading")
+            children = _static_object_array_property(item, "items")
+            if (
+                type_value is None
+                or _decode_js_literal(type_value[0].raw) != "group"
+                or heading is None
+                or children is None
+            ):
+                continue
+            proven = False
+            for child in children:
+                if (
+                    len(child) < 5
+                    or child[0].raw != "this"
+                    or child[1].raw != "."
+                    or child[2].raw not in helpers
+                    or child[3].raw != "("
+                    or _matching_token_index(child, 3) != len(child) - 1
+                ):
+                    continue
+                arguments = _split_top_level_tokens(child[4:-1])
+                if (
+                    len(arguments) < 2
+                    or len(arguments[0]) != 1
+                    or arguments[0][0].kind != "literal"
+                    or len(arguments[1]) != 1
+                    or arguments[1][0].kind != "literal"
+                ):
+                    continue
+                proven = True
+                for argument in arguments[:2]:
+                    _add_settings_schema_value(
+                        collected, argument, argument[0], "pluginSettingTabHelper"
+                    )
+            if proven:
+                _add_settings_schema_value(collected, heading, heading[0], "pluginSettingTab")
 
 
 def _find_linked_description_helpers(

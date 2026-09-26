@@ -9,6 +9,60 @@ from adapters.obsidian.adapter_worker import _decode_js_literal, build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_plugin_setting_tab_descriptors_and_proven_helper_labels(self) -> None:
+        bundle = "\n".join(
+            [
+                'class Settings extends Obsidian.PluginSettingTab {',
+                'getSettingDefinitions(){return [{name:"Help",desc:"Read the documentation.",render:setting=>setting.addButton()},',
+                '{type:"group",heading:"Typography",items:[this.sliderSetting("Small font size","Text in sidebars and tabs.","fontSize"),this.internal("Internal network key","Private configuration value")]}]}',
+                'sliderSetting(name,desc,key){return {name:name,desc:desc,render:setting=>setting.addSlider()}}',
+                'internal(name,desc){return {name:name,desc:desc,key:"private"}}',
+                '}',
+                'class Other {getSettingDefinitions(){return [{name:"Internal title",desc:"Private description",render:setting=>setting.addButton()}]}}',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertTrue(
+            {"Help", "Read the documentation.", "Typography", "Small font size", "Text in sidebars and tabs."}
+            <= strings.keys()
+        )
+        for excluded in (
+            "Internal network key",
+            "Private configuration value",
+            "Internal title",
+        ):
+            self.assertNotIn(excluded, strings)
+        self.assertEqual(
+            strings["Small font size"]["evidence"][0]["symbol"],
+            "pluginSettingTabHelper",
+        )
+
+    def test_plugin_setting_tab_rejects_nested_or_shadowed_helper_return(self) -> None:
+        bundle = "\n".join(
+            [
+                'class Settings extends Obsidian.PluginSettingTab {',
+                'getSettingDefinitions(){return [{type:"group",heading:"Private group",items:[this.sliderSetting("Private slider","Internal network value","key")]}]}',
+                'sliderSetting(name,desc){const nested=()=>{return {name:name,desc:desc,render:x=>x}};return {key:name}}',
+                'sliderSetting(name,desc){return {name:name,desc:desc,render:x=>x}}',
+                '}',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertFalse(
+            {"Private group", "Private slider", "Internal network value"} & sources
+        )
     def test_svelte_dom_attributes_require_a_proven_static_sink(self) -> None:
         bundle = "\n".join(
             [
@@ -262,8 +316,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 35)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v35")
+        self.assertEqual(snapshot["contract_revision"], 36)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v36")
         self.assertTrue(
             {
                 "New template",
