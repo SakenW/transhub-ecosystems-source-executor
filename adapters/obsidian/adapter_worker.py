@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 32
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v32"
+CONTRACT_REVISION: Final = 33
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v33"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -2820,12 +2820,19 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
     if packed_catalogs is not None:
         return packed_catalogs
     assignments: dict[str, list[_Token]] = {}
+    aliases: dict[str, str] = {}
     for index, token in enumerate(tokens[:-2]):
+        if token.kind != "identifier" or tokens[index + 1].raw != "=":
+            continue
         if (
-            token.kind != "identifier"
-            or tokens[index + 1].raw != "="
-            or tokens[index + 2].raw != "{"
+            tokens[index + 2].kind == "identifier"
+            and index > 0
+            and tokens[index - 1].raw in {"var", "let", "const", ",", ";"}
+            and index + 3 < len(tokens)
+            and tokens[index + 3].raw in {",", ";"}
         ):
+            aliases[token.raw] = tokens[index + 2].raw
+        if tokens[index + 2].raw != "{":
             continue
         end = _matching_token_index(tokens, index + 2)
         if end != -1:
@@ -2833,7 +2840,8 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
     lazy_catalogs = _lazy_commonjs_locale_catalogs(tokens, assignments)
     if lazy_catalogs is not None:
         return lazy_catalogs
-    for registry in assignments.values():
+    registry_candidates: list[tuple[int, int, dict[str, str]]] = []
+    for order, registry in enumerate(assignments.values()):
         locale_targets: dict[str, str] = {}
         for entry in _split_top_level_tokens(registry[1:-1]):
             colon = _top_level_token_index(entry, ":")
@@ -2852,17 +2860,39 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
             locale_targets[_canonical_locale(locale_key)] = value[0].raw
         if len(locale_targets) < 3 or "en" not in locale_targets:
             continue
+        registry_candidates.append((
+            0 if locale_targets["en"] in assignments else 1,
+            order,
+            locale_targets,
+        ))
+    combined: dict[str, EmbeddedLocaleCatalog] = {}
+    accepted = 0
+    # Keep the prior direct registry first and cap any additional source growth.
+    for _, order, locale_targets in sorted(registry_candidates):
         generic_result: dict[str, EmbeddedLocaleCatalog] = {}
         for locale, variable in locale_targets.items():
-            assigned = assignments.get(variable)
+            assigned = _resolve_assigned_locale_object(variable, assignments, aliases)
             if assigned is None:
                 continue
             generic_catalog: dict[LocalePath, str] = {}
             _collect_static_locale_value(assigned, (), generic_catalog)
             if generic_catalog and len(generic_catalog) <= MAX_LOCALE_ENTRIES:
                 generic_result[locale] = (f"locale:{locale}", generic_catalog)
-        if "en" in generic_result:
-            return generic_result
+        english = generic_result.get("en")
+        if english is None:
+            continue
+        current_english = combined.get("en")
+        if current_english is not None and len(current_english[1]) + len(english[1]) > MAX_LOCALE_ENTRIES:
+            continue
+        prefix: LocalePath = () if accepted == 0 else (f"registry-{order}",)
+        for locale, (export_name, catalog) in generic_result.items():
+            existing = combined.setdefault(locale, (export_name, {}))[1]
+            existing.update({(*prefix, *path): value for path, value in catalog.items()})
+        accepted += 1
+        if accepted == 2:
+            break
+    if accepted:
+        return combined
     targets: dict[str, tuple[str, str]] = {}
     for index, token in enumerate(tokens):
         match = re.fullmatch(r"STRINGS_([A-Z]{2,3}(?:_[A-Z0-9]{2,8})*)", token.raw)
@@ -2898,6 +2928,26 @@ def _embedded_locale_catalogs(bundle: str) -> dict[str, EmbeddedLocaleCatalog]:
         locale, export_name = target_info
         result.setdefault(locale, (export_name, static_catalog))
     return result if "en" in result else {}
+
+
+def _resolve_assigned_locale_object(
+    name: str,
+    assignments: dict[str, list[_Token]],
+    aliases: dict[str, str],
+) -> list[_Token] | None:
+    visited: set[str] = set()
+    for _ in range(3):
+        assigned = assignments.get(name)
+        if assigned is not None:
+            return assigned
+        if name in visited:
+            return None
+        visited.add(name)
+        next_name = aliases.get(name)
+        if next_name is None:
+            return None
+        name = next_name
+    return None
 
 
 def _lazy_commonjs_locale_catalogs(

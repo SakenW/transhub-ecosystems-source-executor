@@ -109,6 +109,30 @@ return promise;}
         rejected = json.loads(build_snapshot(manifest, invalid.encode("utf-8")))
         self.assertEqual(rejected["native_locale_coverage"], [])
 
+    def test_locale_registry_follows_bounded_dictionary_aliases(self) -> None:
+        bundle = (
+            'var english={"Tag sort order":"Tag sort order","Set an explicit sort order for the specified tags.":"Set an explicit sort order for the specified tags.","Add tag":"Add tag"},enAlias=english;'
+            'var zh={"Tag sort order":"标签排序","Set an explicit sort order for the specified tags.":"指定标签的排序顺序。","Add tag":"添加标签"},zhAlias=zh;'
+            'var de={"Tag sort order":"Tag-Sortierung","Set an explicit sort order for the specified tags.":"Tags sortieren.","Add tag":"Tag hinzufügen"};'
+            'var locales={de:de,en:enAlias,zh:zhAlias};'
+            'var internal={"Debug worker":"Debug worker"};'
+        )
+        manifest = b'{"id":"obsidian-kanban","name":"Kanban","version":"2.0.51","description":"Boards."}'
+        snapshot = json.loads(build_snapshot(manifest, bundle.encode()))
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertIn("Tag sort order", strings)
+        self.assertTrue(strings["Tag sort order"]["evidence"][0]["symbol"].startswith("locale:en"))
+        self.assertNotIn("Debug worker", strings)
+        self.assertTrue(any(row["locale"] == "zh-CN" for row in snapshot["native_locale_coverage"]))
+
+        dates = 'var en={month:"April",day:"Monday",year:"Year"},fr={month:"Avril",day:"Lundi",year:"Année"},es={month:"Abril",day:"Lunes",year:"Año"},dateLocales={en:en,fr:fr,es:es};'
+        combined = json.loads(build_snapshot(manifest, (bundle + dates).encode()))
+        self.assertTrue({"Tag sort order", "April"} <= {row["source"] for row in combined["strings"]})
+
+        cycle = bundle.replace("enAlias=english", "enAlias=other,other=enAlias")
+        rejected = json.loads(build_snapshot(manifest, cycle.encode()))
+        self.assertNotIn("Tag sort order", {row["source"] for row in rejected["strings"]})
+
     def test_bounded_packed_native_catalog_exposes_english_source(self) -> None:
         chinese = 'var zh={title:"目录标题",help:"目录帮助",button:"保存更改"};'
         spanish = 'var es={title:"Título del catálogo",help:"Ayuda del catálogo",button:"Guardar cambios"};'
@@ -171,8 +195,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 32)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v32")
+        self.assertEqual(snapshot["contract_revision"], 33)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v33")
         self.assertTrue(
             {
                 "New template",
