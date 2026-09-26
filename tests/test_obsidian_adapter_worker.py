@@ -171,8 +171,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 30)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v30")
+        self.assertEqual(snapshot["contract_revision"], 31)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v31")
         self.assertTrue(
             {
                 "New template",
@@ -196,6 +196,28 @@ return promise;}
         self.assertEqual(
             strings["Capture to active file"]["evidence"][0]["symbol"], "svelteForm"
         )
+
+    def test_indexed_error_bag_requires_proven_dom_text_helper(self) -> None:
+        warning = "Pandoc is not installed or accessible on your PATH. This plugin's functionality will be limited."
+        positive = (
+            f'this.errorMessages = {{ pandoc: {json.dumps(warning)}, latex: "LaTeX is not installed." }};'
+            'const createError = (text) => containerEl.createEl("p", { cls: "plugin-error", text });'
+            'createError(this.errorMessages[binary]);'
+            'this.internalMessages = { secret: "Internal diagnostic message" };'
+        )
+        manifest = b'{"id":"obsidian-pandoc","name":"Pandoc Plugin","version":"0.4.1","description":"Export with Pandoc."}'
+        strings = {row["source"]: row for row in json.loads(build_snapshot(manifest, positive.encode()))["strings"]}
+        self.assertEqual(strings[warning]["evidence"][0]["symbol"], "indexedErrorMessage")
+        self.assertIn("LaTeX is not installed.", strings)
+        self.assertNotIn("Internal diagnostic message", strings)
+
+        negative = (
+            f'this.errorMessages = {{ pandoc: {json.dumps(warning)} }};'
+            'const createError = (text) => console.error(text);'
+            'createError(this.errorMessages[binary]);'
+        )
+        rejected = {row["source"] for row in json.loads(build_snapshot(manifest, negative.encode()))["strings"]}
+        self.assertNotIn(warning, rejected)
 
     def test_choice_factory_does_not_borrow_unrelated_switch_brace(self) -> None:
         bundle = 'switch (kind); const options = { case "Template": return "New template", case "Capture": return "New capture", case "Macro": return "New macro" };'

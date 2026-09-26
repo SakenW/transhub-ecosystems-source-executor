@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 30
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v30"
+CONTRACT_REVISION: Final = 31
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v31"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -878,8 +878,106 @@ def _collect_structured_matches(
     _collect_svelte_template_text(tokens, collected)
     _collect_svelte_reactive_text(tokens, matching, collected)
     _collect_choice_name_factories(tokens, matching, collected)
+    _collect_indexed_error_messages(tokens, matching, collected)
     _collect_grouped_ui_text_dictionary(tokens, matching, collected)
     return True
+
+
+def _collect_indexed_error_messages(
+    tokens: list[_Token],
+    matching: array,
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Only collect a small indexed bag when a local helper renders its text."""
+
+    for index in range(len(tokens) - 4):
+        if tokens[index].raw != "this":
+            continue
+        if [token.raw for token in tokens[index + 1 : index + 5]] != [
+            ".", "errorMessages", "=", "{"
+        ]:
+            continue
+        end = cast(int, matching[index + 4])
+        if end < 0 or end - index > 128:
+            continue
+        if not _has_indexed_error_message_sink(
+            tokens, matching, end + 1, min(len(tokens), end + 512)
+        ):
+            continue
+        entries = _split_top_level_tokens(tokens[index + 5 : end])
+        if not 0 < len(entries) <= 16:
+            continue
+        for entry in entries:
+            colon = _top_level_token_index(entry, ":")
+            if (
+                colon != 1
+                or _static_catalog_key(entry[:colon]) is None
+                or len(entry) != 3
+                or entry[2].kind != "literal"
+            ):
+                continue
+            _add_settings_schema_value(
+                collected, [entry[2]], entry[0], "indexedErrorMessage"
+            )
+
+
+def _has_indexed_error_message_sink(
+    tokens: list[_Token], matching: array, start: int, end: int
+) -> bool:
+    helper_renders_text = False
+    bag_passed_to_helper = False
+    for index in range(start, end - 7):
+        if tokens[index].raw != "createError":
+            continue
+        if (
+            [token.raw for token in tokens[index + 1 : index + 3]] == ["=", "("]
+            and tokens[index + 3].kind == "identifier"
+            and [token.raw for token in tokens[index + 4 : index + 7]]
+            == [")", "=", ">"]
+        ):
+            parameter = tokens[index + 3].raw
+            for cursor in range(index + 7, min(end, index + 80)):
+                if tokens[cursor].raw == ";":
+                    break
+                if (
+                    cursor + 1 >= end
+                    or tokens[cursor].raw != "createEl"
+                    or tokens[cursor + 1].raw != "("
+                ):
+                    continue
+                call = _read_call_arguments(tokens, cursor + 1, matching)
+                if call is None or len(call[0]) < 2:
+                    continue
+                options = call[0][1]
+                if (
+                    not options
+                    or options[0].raw != "{"
+                    or _matching_token_index(options, 0) != len(options) - 1
+                ):
+                    continue
+                helper_renders_text = helper_renders_text or any(
+                    (len(prop) == 1 and prop[0].raw == "text" and parameter == "text")
+                    or (
+                        len(prop) == 3
+                        and [token.raw for token in prop[:2]] == ["text", ":"]
+                        and prop[2].raw == parameter
+                    )
+                    for prop in _split_top_level_tokens(options[1:-1])
+                )
+        if tokens[index + 1].raw != "(":
+            continue
+        call = _read_call_arguments(tokens, index + 1, matching)
+        if call is None or not call[0]:
+            continue
+        argument = call[0][0]
+        if (
+            len(argument) >= 6
+            and [token.raw for token in argument[:4]]
+            == ["this", ".", "errorMessages", "["]
+            and _matching_token_index(argument, 3) == len(argument) - 1
+        ):
+            bag_passed_to_helper = True
+    return helper_renders_text and bag_passed_to_helper
 
 
 def _collect_grouped_ui_text_dictionary(
