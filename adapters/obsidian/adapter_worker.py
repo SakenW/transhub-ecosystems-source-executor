@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 33
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v33"
+CONTRACT_REVISION: Final = 34
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v34"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -594,8 +594,8 @@ def _normalize_community_bundle(bundle: str) -> str:
     return bundle.rstrip()
 
 
-def _is_translatable_ui_text(value: str) -> bool:
-    if not 2 <= len(value) <= 300:
+def _is_translatable_ui_text(value: str, max_length: int = 300) -> bool:
+    if not 2 <= len(value) <= max_length:
         return False
     if not any(unicodedata.category(character).startswith("L") for character in value):
         return False
@@ -707,9 +707,10 @@ def _add_candidate(
         and not ui_context_verified
     ):
         return
+    max_length = 512 if ui_context_verified or origin == "ui-call" else 300
     if (
-        not _is_translatable_ui_text(value)
-        or not _is_translatable_ui_text(probe)
+        not _is_translatable_ui_text(value, max_length)
+        or not _is_translatable_ui_text(probe, max_length)
         or not _is_plausible_source_locale_text(value, source_locale)
     ):
         return
@@ -896,7 +897,10 @@ def _collect_structured_matches(
                     ui_context_verified=index in ui_context_property_indices,
                 )
     _collect_settings_schema_entries(tokens, matching, collected)
-    group_descriptions = _collect_settings_group_descriptors(tokens, matching, collected)
+    linked_description_helpers = _find_linked_description_helpers(tokens, matching)
+    group_descriptions = _collect_settings_group_descriptors(
+        tokens, matching, collected, linked_description_helpers
+    )
     _collect_composed_settings_descriptions(tokens, matching, group_descriptions, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
@@ -1391,6 +1395,7 @@ def _collect_settings_group_descriptors(
     tokens: list[_Token],
     matching: Sequence[int],
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+    linked_description_helpers: set[str],
 ) -> set[str]:
     """Extract declarative settings-group descriptors such as QuickAdd's
     ``{ type: "group", heading: "Choice picker", items: [...] }``."""
@@ -1427,8 +1432,9 @@ def _collect_settings_group_descriptors(
                 if expression is not None:
                     _add_settings_schema_value(collected, expression, descriptor_key)
                 elif property_name != "name":
+                    description = _static_object_property(item, property_name)
                     documentation_lead = _first_literal_argument(
-                        _static_object_property(item, property_name)
+                        description
                     )
                     if documentation_lead is not None:
                         _add_settings_schema_value(
@@ -1437,8 +1443,112 @@ def _collect_settings_group_descriptors(
                             descriptor_key,
                             "settingsDocumentation",
                         )
+                    for literal in _linked_description_literals(
+                        description, linked_description_helpers
+                    ):
+                        _add_settings_schema_value(
+                            collected, literal, descriptor_key, "settingsLinkedFragment"
+                        )
             _collect_settings_dropdown_options(item, descriptor_key, collected)
     return description_names
+
+
+def _find_linked_description_helpers(
+    tokens: list[_Token], matching: Sequence[int]
+) -> set[str]:
+    """Prove text-node and link-label sinks before reading helper arguments."""
+    declarations: dict[str, tuple[list[str], int, int]] = {}
+    duplicates: set[str] = set()
+    for index in range(len(tokens) - 4):
+        if (
+            tokens[index].raw != "function"
+            or tokens[index + 1].kind != "identifier"
+            or tokens[index + 2].raw != "("
+        ):
+            continue
+        name = tokens[index + 1].raw
+        close = matching[index + 2]
+        open_index = close + 1
+        end = matching[open_index] if 0 <= open_index < len(tokens) else -1
+        if (
+            close < 0
+            or open_index >= len(tokens)
+            or tokens[open_index].raw != "{"
+            or end < 0
+            or end - open_index > 180
+        ):
+            continue
+        if name in declarations:
+            duplicates.add(name)
+        params = [
+            part[0].raw if part and part[0].kind == "identifier" else ""
+            for part in _split_top_level_tokens(tokens[index + 3 : close])
+        ]
+        declarations[name] = (params, open_index + 1, end)
+    link_helpers: set[str] = set()
+    for name, (params, start, end) in declarations.items():
+        if name in duplicates or len(params) < 3:
+            continue
+        parent, url, label = params[:3]
+        body = tokens[start:end]
+        if (
+            _has_token_sequence(body, ("textContent", "=", label))
+            and _has_token_sequence(body, ("href", "=", url))
+            and _has_token_sequence(body, (parent, ".", "append", "("))
+        ):
+            link_helpers.add(name)
+    wrappers: set[str] = set()
+    for name, (params, start, end) in declarations.items():
+        if name in duplicates or len(params) < 3:
+            continue
+        lead, url, label = params[:3]
+        body = tokens[start:end]
+        if not (
+            _has_token_sequence(body, ("createFragment", "("))
+            and _has_token_sequence(body, ("document", ".", "createTextNode", "(", lead, ")"))
+            and _has_token_sequence(body, ("return",))
+        ):
+            continue
+        for index in range(start, end - 1):
+            if tokens[index].raw not in link_helpers or tokens[index + 1].raw != "(":
+                continue
+            parsed = _read_call_arguments(tokens, index + 1, matching)
+            args = parsed[0] if parsed is not None else []
+            if (
+                len(args) == 3
+                and len(args[1]) == 1
+                and args[1][0].raw == url
+                and len(args[2]) == 1
+                and args[2][0].raw == label
+            ):
+                wrappers.add(name)
+    return wrappers
+
+
+def _has_token_sequence(tokens: list[_Token], sequence: tuple[str, ...]) -> bool:
+    return any(
+        all(tokens[index + offset].raw == raw for offset, raw in enumerate(sequence))
+        for index in range(len(tokens) - len(sequence) + 1)
+    )
+
+
+def _linked_description_literals(
+    expression: list[_Token] | None, helpers: set[str]
+) -> list[list[_Token]]:
+    if (
+        expression is None
+        or len(expression) < 4
+        or expression[0].kind != "identifier"
+        or expression[0].raw not in helpers
+        or expression[1].raw != "("
+        or _matching_token_index(expression, 1) != len(expression) - 1
+    ):
+        return []
+    args = _split_top_level_tokens(expression[2:-1])
+    return [
+        part for part in (args[0], args[2])
+        if len(part) == 1 and part[0].kind == "literal"
+    ] if len(args) >= 3 else []
 
 
 def _collect_composed_settings_descriptions(

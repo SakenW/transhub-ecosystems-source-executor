@@ -195,8 +195,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 33)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v33")
+        self.assertEqual(snapshot["contract_revision"], 34)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v34")
         self.assertTrue(
             {
                 "New template",
@@ -242,6 +242,39 @@ return promise;}
         )
         rejected = {row["source"] for row in json.loads(build_snapshot(manifest, negative.encode()))["strings"]}
         self.assertNotIn(warning, rejected)
+
+    def test_long_settings_description_requires_proven_ui_context(self) -> None:
+        description = 'List/object values from scripts are always written as proper Obsidian properties (a list becomes a List). This toggle additionally converts string values into typed properties: a comma or bullet-list string becomes a List, "42" becomes a Number, "true" becomes a Checkbox, etc. Disabled by default; the string conversion is a beta heuristic that may have edge cases.'
+        self.assertGreater(len(description), 300)
+        self.assertLess(len(description), 512)
+        manifest = b'{"id":"quickadd","name":"QuickAdd","version":"2.27.0","description":"Add content."}'
+        bundle = f'const group={{type:"group",heading:"Templates & properties",items:[{{name:"Convert values",desc:{json.dumps(description)}}}]}};'
+        snapshot = json.loads(build_snapshot(manifest, bundle.encode()))
+        self.assertIn(description, {row["source"] for row in snapshot["strings"]})
+        unproven = json.loads(build_snapshot(manifest, f'const internal={{description:{json.dumps(description)}}};'.encode()))
+        self.assertNotIn(description, {row["source"] for row in unproven["strings"]})
+        over_limit = "A" * 513
+        rejected = json.loads(build_snapshot(manifest, f'setting.setDesc({json.dumps(over_limit)});'.encode()))
+        self.assertNotIn(over_limit, {row["source"] for row in rejected["strings"]})
+
+    def test_linked_settings_copy_requires_text_node_and_link_label_sinks(self) -> None:
+        lead = "Collect a choice's inputs in one form before it runs, instead of one prompt at a time."
+        label = "Learn more about one-page inputs"
+        manifest = b'{"id":"quickadd","name":"QuickAdd","version":"2.27.0","description":"Add content."}'
+        bundle = ";".join((
+            'function link(parent,url,label){let a=parent.createEl("a");a.textContent=label;a.href=url;parent.append(a);return a}',
+            'function linked(lead,url,label="Learn more"){let fragment=createFragment();return fragment.append(document.createTextNode(lead)),link(fragment,url,label),fragment}',
+            f'const group={{type:"group",heading:"Input",items:[{{name:"One-page input for choices",desc:linked({json.dumps(lead)},docs.onePage,{json.dumps(label)}),control:{{type:"toggle"}}}}]}}',
+            'function internal(lead,url,label){return console.log(lead,url,label)}',
+            'const other={type:"group",heading:"Other",items:[{name:"Internal",desc:internal("Internal key",docs.other,"Internal link"),control:{type:"toggle"}}]}',
+        ))
+        snapshot = json.loads(build_snapshot(manifest, bundle.encode()))
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertIn(lead, strings)
+        self.assertIn(label, strings)
+        self.assertEqual(strings[lead]["evidence"][0]["symbol"], "settingsLinkedFragment")
+        self.assertNotIn("Internal key", strings)
+        self.assertNotIn("Internal link", strings)
 
     def test_es_unicode_code_point_escape_matches_client_and_rejects_invalid_scalars(self) -> None:
         self.assertEqual(
