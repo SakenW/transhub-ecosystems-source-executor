@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 36
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v36"
+CONTRACT_REVISION: Final = 37
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v37"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -867,6 +867,37 @@ def _collect_structured_matches(
                 ui_context_verified=True,
                 accept_rendered=_single_line_text if token.raw == "innerText" else None,
             )
+            continue
+        if (
+            token.raw == "setAttribute"
+            and next_token is not None
+            and next_token.raw == "("
+            and _is_member_expression_receiver(tokens, index)
+        ):
+            call = _read_call_arguments(tokens, index + 1, matching)
+            if call is None:
+                return False
+            arguments, _ = call
+            if len(arguments) >= 2:
+                attribute, value = arguments[:2]
+                if (
+                    len(attribute) == 1
+                    and len(value) == 1
+                    and value[0].kind == "literal"
+                    and _decode_js_literal(attribute[0].raw)
+                    in {"aria-label", "title", "placeholder"}
+                ):
+                    rendered = _render_expression(value, [0])
+                    if rendered is not None and re.search(
+                        r"[\u3400-\u9fff\U00020000-\U0002fa1f]", rendered.text
+                    ) is None:
+                        _add_structured_expression(
+                            collected,
+                            value,
+                            "ui-property",
+                            token,
+                            ui_context_verified=True,
+                        )
             continue
         if (
             _is_safe_react_create_element_call(tokens, index)

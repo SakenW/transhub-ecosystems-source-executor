@@ -9,6 +9,30 @@ from adapters.obsidian.adapter_worker import _decode_js_literal, build_snapshot
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_static_visible_dom_attributes_do_not_harvest_data_keys(self) -> None:
+        bundle = "\n".join(
+            [
+                'const button=document.createElement("button");',
+                'button.setAttribute("aria-label","Open choices");',
+                'button.setAttribute("title","Show selected note");',
+                'button.setAttribute("data-key","Internal configuration key");',
+                'button.setAttribute("aria-label","PKMer 插件市场");',
+                'button.setAttribute(dynamicName,"Dynamic internal value");',
+                'config["setAttribute"]("aria-label","Unproven indexed call");',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        sources = {row["source"] for row in snapshot["strings"]}
+        self.assertTrue({"Open choices", "Show selected note"} <= sources)
+        self.assertFalse(
+            {"Internal configuration key", "PKMer 插件市场", "Dynamic internal value", "Unproven indexed call"}
+            & sources
+        )
     def test_plugin_setting_tab_descriptors_and_proven_helper_labels(self) -> None:
         bundle = "\n".join(
             [
@@ -316,8 +340,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 36)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v36")
+        self.assertEqual(snapshot["contract_revision"], 37)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v37")
         self.assertTrue(
             {
                 "New template",
