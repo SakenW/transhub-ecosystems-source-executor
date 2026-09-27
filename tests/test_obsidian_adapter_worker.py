@@ -33,6 +33,36 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
             {"Internal configuration key", "PKMer 插件市场", "Dynamic internal value", "Unproven indexed call"}
             & sources
         )
+
+    def test_bundled_jsx_native_visible_attributes_skip_unproven_factories(self) -> None:
+        bundle = "\n".join(
+            [
+                '(0,Bo.jsx)("div", {className:"nn-shortcuts-resize-handle",role:"separator","aria-label":"Resize pinned shortcuts"});',
+                '(0,Bo.jsxs)("button", {title:"Open pinned shortcuts",children:"Pinned shortcuts"});',
+                '(0,Bo.jsx)("input", {placeholder:"Find files"});',
+                '(0,Bo.jsx)(Dropdown, {title:"Component config title",name:"months"});',
+                '(0,Bo.jsx)("script", {title:"Script payload"});',
+                '(0,Bo.jsx)("div", {"aria-label":getLabel(),"data-title":"Internal metadata"});',
+                'Bo.jsx("div", {"aria-label":"Unproven direct factory"});',
+            ]
+        )
+        snapshot = json.loads(
+            build_snapshot(
+                b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+                bundle.encode("utf-8"),
+            )
+        )
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertTrue(
+            {"Resize pinned shortcuts", "Open pinned shortcuts", "Pinned shortcuts", "Find files"}
+            <= strings.keys()
+        )
+        for rejected in (
+            "Component config title", "months", "Script payload", "Internal metadata", "Unproven direct factory"
+        ):
+            self.assertNotIn(rejected, strings)
+        self.assertEqual(strings["Resize pinned shortcuts"]["evidence"][0]["symbol"], "aria-label")
+
     def test_plugin_setting_tab_descriptors_and_proven_helper_labels(self) -> None:
         bundle = "\n".join(
             [
@@ -340,8 +370,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 37)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v37")
+        self.assertEqual(snapshot["contract_revision"], 38)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v38")
         self.assertTrue(
             {
                 "New template",

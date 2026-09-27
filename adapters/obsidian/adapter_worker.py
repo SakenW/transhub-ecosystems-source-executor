@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 37
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v37"
+CONTRACT_REVISION: Final = 38
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v38"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -910,6 +910,15 @@ def _collect_structured_matches(
             arguments, end_index = call
             if len(create_element_ends) < MAX_NESTED_CREATE_ELEMENT_DEPTH:
                 _collect_react_create_element(arguments, token, collected)
+            create_element_ends.append(end_index)
+            continue
+        if _is_bundled_react_jsx_call(tokens, index):
+            call = _read_call_arguments(tokens, index + 2, matching)
+            if call is None:
+                return False
+            arguments, end_index = call
+            if len(create_element_ends) < MAX_NESTED_CREATE_ELEMENT_DEPTH:
+                _collect_bundled_react_jsx(arguments, token, collected)
             create_element_ends.append(end_index)
             continue
         if (
@@ -2480,6 +2489,42 @@ def _is_safe_react_create_element_call(tokens: list[_Token], index: int) -> bool
         and tokens[index - 3].raw == "."
         and tokens[index - 4].kind == "identifier"
     )
+
+
+def _is_bundled_react_jsx_call(tokens: list[_Token], index: int) -> bool:
+    """Accept esbuild's `(0, runtime.jsx)(native_tag, props)` shape only."""
+
+    return (
+        index >= 5
+        and index + 2 < len(tokens)
+        and tokens[index].raw in {"jsx", "jsxs"}
+        and tokens[index - 1].raw == "."
+        and tokens[index - 2].kind == "identifier"
+        and tokens[index - 3].raw == ","
+        and tokens[index - 4].raw == "0"
+        and tokens[index - 5].raw == "("
+        and tokens[index + 1].raw == ")"
+        and tokens[index + 2].raw == "("
+    )
+
+
+def _collect_bundled_react_jsx(
+    arguments: list[list[_Token]],
+    call_token: _Token,
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    tag_expression = _strip_wrapping_parentheses(arguments[0] if arguments else [])
+    tag_name = (
+        _decode_js_literal(tag_expression[0].raw)
+        if len(tag_expression) == 1 and tag_expression[0].kind == "literal"
+        else None
+    )
+    if tag_name not in SAFE_NATIVE_DOM_TAG_NAMES:
+        return
+    if len(arguments) > 1:
+        _collect_native_dom_visible_properties(
+            arguments[1], call_token, collected, accepts_children=True
+        )
 
 
 def _add_structured_expression(
