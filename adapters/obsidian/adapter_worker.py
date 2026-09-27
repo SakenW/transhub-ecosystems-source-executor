@@ -2523,8 +2523,27 @@ def _collect_bundled_react_jsx(
         return
     if len(arguments) > 1:
         _collect_native_dom_visible_properties(
-            arguments[1], call_token, collected, accepts_children=True
+            arguments[1], call_token, collected,
+            accepts_children=not _is_static_aria_hidden(arguments[1]),
         )
+
+
+def _is_static_aria_hidden(expression: list[_Token]) -> bool:
+    properties = _strip_wrapping_parentheses(expression)
+    if (
+        not properties
+        or properties[0].raw != "{"
+        or _matching_token_index(properties, 0) != len(properties) - 1
+    ):
+        return False
+    for entry in _split_top_level_tokens(properties[1:-1]):
+        colon = _top_level_token_index(entry, ":")
+        if colon <= 0 or _static_catalog_key(entry[:colon]) != "aria-hidden":
+            continue
+        value = "".join(token.raw for token in entry[colon + 1 :])
+        if value in {"true", "!0"} or _decode_js_literal(value) == "true":
+            return True
+    return False
 
 
 def _add_structured_expression(

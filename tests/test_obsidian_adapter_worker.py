@@ -40,6 +40,9 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
                 '(0,Bo.jsx)("div", {className:"nn-shortcuts-resize-handle",role:"separator","aria-label":"Resize pinned shortcuts"});',
                 '(0,Bo.jsxs)("button", {title:"Open pinned shortcuts",children:"Pinned shortcuts"});',
                 '(0,Bo.jsx)("input", {placeholder:"Find files"});',
+                '(0,Bo.jsx)("span", {"aria-hidden":"true",children:"Decorative glyph"});',
+                '(0,Bo.jsx)("span", {"aria-hidden":true,children:"Decorative boolean"});',
+                '(0,Bo.jsx)("span", {"aria-hidden":!0,children:"Decorative minified"});',
                 '(0,Bo.jsx)(Dropdown, {title:"Component config title",name:"months"});',
                 '(0,Bo.jsx)("script", {title:"Script payload"});',
                 '(0,Bo.jsx)("div", {"aria-label":getLabel(),"data-title":"Internal metadata"});',
@@ -58,7 +61,8 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
             <= strings.keys()
         )
         for rejected in (
-            "Component config title", "months", "Script payload", "Internal metadata", "Unproven direct factory"
+            "Component config title", "months", "Script payload", "Internal metadata", "Unproven direct factory",
+            "Decorative glyph", "Decorative boolean", "Decorative minified"
         ):
             self.assertNotIn(rejected, strings)
         self.assertEqual(strings["Resize pinned shortcuts"]["evidence"][0]["symbol"], "aria-label")
