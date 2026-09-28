@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 40
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v40"
+CONTRACT_REVISION: Final = 41
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v41"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -947,6 +947,7 @@ def _collect_structured_matches(
     )
     _collect_forwarded_method_labels(tokens, matching, collected)
     _collect_map_key_option_labels(tokens, matching, collected)
+    _collect_mapped_label_dictionaries(tokens, matching, collected)
     _collect_composed_menu_titles(tokens, matching, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
@@ -1190,6 +1191,115 @@ def _collect_map_key_option_labels(
                 for key, token in keys:
                     if key != "__proto__":
                         _add_indirect_ui_text(collected, key, token, "mapKeyDropdownOption")
+
+
+def _collect_mapped_label_dictionaries(
+    tokens: list[_Token], matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """A flat lookup is UI copy only when all reads feed labels in an array map."""
+    candidates: list[tuple[str, int, int, set[str], list[tuple[str, _Token]]]] = []
+    for index in range(1, len(tokens) - 5):
+        if (tokens[index].kind != "identifier"
+                or tokens[index - 1].raw not in {"var", "let", "const", ",", ";"}
+                or tokens[index + 1].raw != "=" or tokens[index + 2].raw != "{"):
+            continue
+        end = matching[index + 2]
+        if (end < 0 or end - index > 256 or end + 1 >= len(tokens)
+                or tokens[end + 1].raw not in {",", ";"}):
+            continue
+        entries = _split_top_level_tokens(tokens[index + 3:end])
+        if not 2 <= len(entries) <= 32:
+            continue
+        values: list[tuple[str, _Token]] = []
+        keys: set[str] = set()
+        for entry in entries:
+            colon = _top_level_token_index(entry, ":")
+            key = _static_catalog_key(entry[:colon]) if colon == 1 else None
+            literal = entry[colon + 1] if colon == len(entry) - 2 else None
+            value = _decode_js_literal(literal.raw) if literal is not None and literal.kind == "literal" else None
+            if (key is None or key == "__proto__" or key in keys or literal is None or value is None
+                    or literal.raw.startswith("`") and "${" in literal.raw):
+                break
+            keys.add(key)
+            values.append((value, literal))
+        if len(values) == len(entries):
+            candidates.append((tokens[index].raw, index, end, keys, values))
+    if not candidates:
+        return
+    names = {candidate[0] for candidate in candidates}
+    uses: dict[str, list[int]] = {name: [] for name in names}
+    for index, token in enumerate(tokens):
+        if token.kind == "identifier" and token.raw in names and not (
+            index > 0 and tokens[index - 1].raw == "."
+        ) and not (
+            index > 0 and index + 1 < len(tokens)
+            and tokens[index - 1].raw in {"{", ","} and tokens[index + 1].raw == ":"
+        ):
+            uses[token.raw].append(index)
+    for name, declaration, end, keys, values in candidates:
+        refs = uses[name]
+        if (len(refs) < 2 or refs[0] != declaration
+                or any(_template_mentions(token, name) for token in tokens)):
+            continue
+        if any(not (
+            ref > end and ref >= 2 and ref + 3 < len(tokens)
+            and [tokens[ref - 2].raw, tokens[ref - 1].raw] == ["label", ":"]
+            and tokens[ref + 1].raw == "[" and tokens[ref + 2].kind == "identifier"
+            and tokens[ref + 3].raw == "]"
+            and _inside_array_map(tokens, matching, ref, keys)
+        ) for ref in refs[1:]):
+            continue
+        for value, literal in values:
+            _add_candidate(collected, value, "ui-property", {
+                "origin": "ui-property", "strategy": "structured", "symbol": "mappedLabel",
+                "offset": literal.start, "line": literal.line, "column": literal.column,
+            }, static_probe=value, ui_context_verified=True)
+
+
+def _inside_array_map(
+    tokens: list[_Token], matching: Sequence[int], use: int, keys: set[str],
+) -> bool:
+    for index in range(use - 1, max(0, use - 48) - 1, -1):
+        if (tokens[index].raw == "map" and index > 0
+                and tokens[index - 1].raw == "." and index >= 3
+                and tokens[index - 2].kind == "identifier" and tokens[index - 3].raw != "."
+                and index + 4 < len(tokens) and use + 2 < len(tokens)
+                and tokens[index + 1].raw == "(" and matching[index + 1] > use
+                and tokens[index + 2].raw == tokens[use + 2].raw
+                and tokens[index + 3].raw == "=" and tokens[index + 4].raw == ">"
+                and _static_array_keys(tokens, matching, tokens[index - 2].raw, keys)):
+            return True
+    return False
+
+
+def _static_array_keys(
+    tokens: list[_Token], matching: Sequence[int], name: str, keys: set[str],
+) -> bool:
+    uses = [index for index, token in enumerate(tokens)
+            if token.kind == "identifier" and token.raw == name
+            and not (index > 0 and tokens[index - 1].raw == ".")
+            and not (index > 0 and index + 1 < len(tokens)
+                     and tokens[index - 1].raw in {"{", ","} and tokens[index + 1].raw == ":")]
+    declarations = [index for index in uses if index > 0 and index + 2 < len(tokens)
+                    and tokens[index - 1].raw in {"var", "let", "const", ",", ";"}
+                    and tokens[index + 1].raw == "=" and tokens[index + 2].raw == "["]
+    if len(declarations) != 1:
+        return False
+    declaration = declarations[0]
+    end = matching[declaration + 2]
+    if (end < 0 or end - declaration > 128 or end + 1 >= len(tokens)
+            or tokens[end + 1].raw not in {",", ";"}
+            or any(index != declaration and (
+                index < end or index + 2 >= len(tokens)
+                or tokens[index + 1].raw != "." or tokens[index + 2].raw != "map"
+            ) for index in uses)):
+        return False
+    values = [_decode_js_literal(entry[0].raw) if len(entry) == 1 and entry[0].kind == "literal" else None
+              for entry in _split_top_level_tokens(tokens[declaration + 3:end])]
+    return (len(values) == len(keys)
+            and all(value is not None and value in keys for value in values)
+            and set(values) == keys)
 
 
 def _collect_composed_menu_titles(
@@ -2975,6 +3085,11 @@ def _collect_react_create_element(
             call_token,
             collected,
             accepts_children=native_tag or component_tag,
+            visible_properties=(
+                SAFE_NATIVE_DOM_VISIBLE_PROPERTIES
+                | {"label", "description", "caption", "subtitle"}
+                if component_tag else SAFE_NATIVE_DOM_VISIBLE_PROPERTIES
+            ),
         )
     for child in arguments[2:]:
         _add_safe_native_dom_expression(
@@ -2988,6 +3103,7 @@ def _collect_native_dom_visible_properties(
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
     *,
     accepts_children: bool,
+    visible_properties: frozenset[str] | set[str] = SAFE_NATIVE_DOM_VISIBLE_PROPERTIES,
 ) -> None:
     properties = _strip_wrapping_parentheses(expression)
     if (
@@ -3006,7 +3122,7 @@ def _collect_native_dom_visible_properties(
                 collected, entry[colon + 1 :], "ui-call", call_token, "createElement"
             )
             continue
-        if key not in SAFE_NATIVE_DOM_VISIBLE_PROPERTIES:
+        if key not in visible_properties:
             continue
         _add_safe_native_dom_expression(
             collected,
