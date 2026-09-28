@@ -1,9 +1,11 @@
 # Trans-Hub Ecosystems Source Executor
 
 This public repository contains the auditable Obsidian source executor used by
-Trans-Hub's on-demand public discovery flow. On each scheduled or manual run it first tries
-one Stage A registry-resolution job, then one existing Stage B source-discovery
-job. Stage A pins and reads the official Obsidian directory only for the claimed
+Trans-Hub's on-demand public discovery flow. On each scheduled or manual run it
+starts at most four fair cycles while its four-minute start budget remains. A
+claimed cycle finishes under its existing task limits. Each
+cycle first tries one Stage A registry-resolution job, then one existing Stage B
+source-discovery job. Stage A pins and reads the official Obsidian directory only for the claimed
 plugin, verifies the directory repository, plugin repository, preferred stable release,
 release commit, and exact `manifest.json`/`main.js` asset metadata, and returns
 only identities and digests. Stage B reads those two server-approved release
@@ -22,8 +24,8 @@ workflow accepts only two repository variables:
 - `TRANSHUB_PUBLIC_DISCOVERY_OIDC_AUDIENCE`: the dedicated OIDC audience.
 
 No GitHub secret, cache, workflow artifact, repository dispatch, or
-caller-provided URL is used. A protected default-branch schedule runs one fair
-cycle every five minutes, alongside manual dispatch. Stage A selects only the version-controlled
+caller-provided URL is used. A protected default-branch schedule starts a bounded
+drain every five minutes, alongside manual dispatch. Stage A selects only the version-controlled
 `official-directory` profile. That profile fixes GitHub REST API version
 `2026-03-10`, repository ID `262342594`, owner ID `65011256`,
 `obsidianmd/obsidian-releases`, branch `master`, and
@@ -119,8 +121,9 @@ require Docker.
 - Stage A failures emit a bounded, sanitized diagnostic before Stage B runs,
   so a second failure cannot hide the first one.
 - The workflow does not mutate this repository and stores no cache or artifact.
-  A healthy run fairly tries one Stage A claim before one Stage B claim and
-  emits `executor_no_job` when both queues are empty. A failed run leaves no
+  Each healthy cycle tries one Stage A claim before one Stage B claim. The run
+  stops when both queues are empty or no further cycle fits its fixed budget;
+  `executor_no_job` is emitted on an empty cycle. A failed run leaves no
   publication to roll back; job/task failure closure and server-side generation
   changes remain control-plane responsibilities.
 - The component input protocol is

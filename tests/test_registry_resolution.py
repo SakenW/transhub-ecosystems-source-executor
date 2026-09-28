@@ -18,6 +18,7 @@ from adapters.obsidian.public_discovery_executor import (
     RegistryResolutionClaim,
     RegistryResolutionResult,
     RegistrySnapshot,
+    execute_bounded_drain,
     execute_fair_cycle,
     execute_registry_resolution_one,
     load_official_directory_profile,
@@ -712,6 +713,65 @@ class RegistryResolutionTests(unittest.TestCase):
             )
         self.assertEqual(outcome, "executor_no_job")
         self.assertEqual(events, ["stage-a", "stage-b"])
+
+    def test_bounded_drain_continues_until_idle_without_reordering_cycles(self) -> None:
+        observed: list[str] = []
+        outcomes = iter(("registry_done;source_done", "registry_no_job;source_done", "executor_no_job"))
+        with patch(
+            "adapters.obsidian.public_discovery_executor.execute_fair_cycle",
+            side_effect=lambda **_kwargs: next(outcomes),
+        ) as execute:
+            count = execute_bounded_drain(
+                config=None, tokens=None, control=None, github=None,
+                profile=None, source=None, uploader=None,
+                clock=lambda: 0.0, emit=observed.append,
+            )
+        self.assertEqual(count, 3)
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(observed[-1], "executor_no_job")
+
+    def test_bounded_drain_stops_at_cycle_and_time_limits(self) -> None:
+        with patch(
+            "adapters.obsidian.public_discovery_executor.execute_fair_cycle",
+            return_value="registry_done;source_done",
+        ) as execute:
+            outcomes: list[str] = []
+            count = execute_bounded_drain(
+                config=None, tokens=None, control=None, github=None,
+                profile=None, source=None, uploader=None,
+                clock=lambda: 0.0, emit=outcomes.append,
+            )
+        self.assertEqual(count, 4)
+        self.assertEqual(execute.call_count, 4)
+        self.assertEqual(len(outcomes), 4)
+
+        times = iter((0.0, 4 * 60.0))
+        with patch(
+            "adapters.obsidian.public_discovery_executor.execute_fair_cycle",
+            return_value="registry_done;source_done",
+        ) as execute:
+            count = execute_bounded_drain(
+                config=None, tokens=None, control=None, github=None,
+                profile=None, source=None, uploader=None,
+                clock=lambda: next(times), emit=lambda _outcome: None,
+            )
+        self.assertEqual(count, 1)
+        execute.assert_called_once()
+
+    def test_bounded_drain_preserves_first_result_before_later_failure(self) -> None:
+        observed: list[str] = []
+        with patch(
+            "adapters.obsidian.public_discovery_executor.execute_fair_cycle",
+            side_effect=("registry_done;source_done", ExecutorError("executor_source_unavailable")),
+        ) as execute:
+            with self.assertRaisesRegex(ExecutorError, "executor_source_unavailable"):
+                execute_bounded_drain(
+                    config=None, tokens=None, control=None, github=None,
+                    profile=None, source=None, uploader=None,
+                    clock=lambda: 0.0, emit=observed.append,
+                )
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(observed, ["registry_done;source_done"])
 
     def test_stage_a_failure_is_closed_without_starving_stage_b(self) -> None:
         events: list[str] = []

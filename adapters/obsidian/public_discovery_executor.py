@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed GitHub Actions client for one public-discovery task.
+"""Fail-closed GitHub Actions client for bounded public-discovery work.
 
 The module intentionally keeps every transport locator and credential inside
 the process.  Its command-line surface accepts no URL, token, object key,
@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from time import monotonic
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -48,6 +49,8 @@ _MAX_CONTROL_BYTES: Final = 1024 * 1024
 _MAX_GITHUB_METADATA_BYTES: Final = 8 * 1024 * 1024
 _MAX_LICENSE_BYTES: Final = 1024 * 1024
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
+_MAX_FAIR_CYCLES: Final = 4
+_MAX_FAIR_DRAIN_SECONDS: Final = 4 * 60
 _OFFICIAL_DIRECTORY_PROFILE_PATH: Final = Path(__file__).with_name(
     "official-directory-profile.json"
 )
@@ -1658,6 +1661,41 @@ def execute_fair_cycle(
     return registry_outcome + ";" + source_outcome
 
 
+def execute_bounded_drain(
+    *,
+    config: ExecutorConfig,
+    tokens: TokenProvider,
+    control: HttpControlPlane,
+    github: GitHubMetadataReader,
+    profile: OfficialDirectoryProfile,
+    source: SourceReader,
+    uploader: ResultUploader,
+    clock: Callable[[], float] = monotonic,
+    emit: Callable[[str], None] = print,
+) -> int:
+    """Drain a few fair cycles, leaving time for the protected workflow to exit."""
+
+    started_at = clock()
+    completed = 0
+    for _ in range(_MAX_FAIR_CYCLES):
+        if completed and clock() - started_at >= _MAX_FAIR_DRAIN_SECONDS:
+            break
+        outcome = execute_fair_cycle(
+            config=config,
+            tokens=tokens,
+            control=control,
+            github=github,
+            profile=profile,
+            source=source,
+            uploader=uploader,
+        )
+        emit(outcome)
+        completed += 1
+        if outcome == "executor_no_job":
+            break
+    return completed
+
+
 def _read_pinned_license_evidence(
     metadata: GitHubMetadataReader, plan: SourcePlan
 ) -> LicenseEvidence:
@@ -2126,7 +2164,7 @@ def main() -> int:
         config = ExecutorConfig.from_environment(os.environ)
         tokens = ActionsOidcProvider.from_environment(os.environ, config.oidc_audience)
         control = HttpControlPlane(config.api_base)
-        outcome = execute_fair_cycle(
+        execute_bounded_drain(
             config=config,
             tokens=tokens,
             control=control,
@@ -2143,7 +2181,6 @@ def main() -> int:
         )
         print("public_discovery_executor_failed:" + code, file=sys.stderr)
         return 1
-    print(outcome)
     return 0
 
 
