@@ -282,6 +282,45 @@ class ObsidianAdapterWorkerTests(unittest.TestCase):
             self.assertNotIn(rejected, strings)
         self.assertEqual(strings["Resize pinned shortcuts"]["evidence"][0]["symbol"], "aria-label")
 
+    def test_react_component_presentation_props_exclude_native_dom_data(self) -> None:
+        bundle = "\n".join(
+            [
+                'React.createElement(SettingsGroup,{label:"Agents"},React.createElement(SettingRow,{title:"Default backend",description:"Used when a new session starts."}));',
+                'React.createElement("div",{description:"Internal model description",label:"Internal object label"});',
+                'config.createElement(SettingRow,{description:"Unproven factory description"});',
+            ]
+        )
+        snapshot = json.loads(build_snapshot(
+            b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+            bundle.encode("utf-8"),
+        ))
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertTrue({"Agents", "Default backend", "Used when a new session starts."} <= strings.keys())
+        for rejected in ("Internal model description", "Internal object label", "Unproven factory description"):
+            self.assertNotIn(rejected, strings)
+        self.assertEqual(strings["Used when a new session starts."]["evidence"][0]["symbol"], "description")
+
+    def test_mapped_tab_labels_require_exclusive_label_use(self) -> None:
+        bundle = "\n".join([
+            'var ids=["basic","advanced"];',
+            'var tabNames={basic:"Basic",advanced:"Advanced"},tabs=ids.map(id=>({id:id,label:tabNames[id]}));',
+            'var configNames={basic:"Private mode",advanced:"Private channel"};configNames.basic;',
+            'var escapedNames={basic:"Hidden setting",advanced:"Hidden option"};ids.map(id=>({label:escapedNames[id]}));escapedNames.other="changed";',
+            'var subset=["basic"],unusedNames={basic:"First internal label",advanced:"Unused internal label"};subset.map(id=>({label:unusedNames[id]}));',
+        ])
+        snapshot = json.loads(build_snapshot(
+            b'{"id":"example-plugin","name":"Example Plugin","version":"1.0.0","description":"Example description."}',
+            bundle.encode("utf-8"),
+        ))
+        strings = {row["source"]: row for row in snapshot["strings"]}
+        self.assertTrue({"Basic", "Advanced"} <= strings.keys())
+        for rejected in (
+            "Private mode", "Private channel", "Hidden setting", "Hidden option",
+            "First internal label", "Unused internal label",
+        ):
+            self.assertNotIn(rejected, strings)
+        self.assertEqual(strings["Basic"]["evidence"][0]["symbol"], "mappedLabel")
+
     def test_plugin_setting_tab_descriptors_and_proven_helper_labels(self) -> None:
         bundle = "\n".join(
             [
@@ -589,8 +628,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 40)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v40")
+        self.assertEqual(snapshot["contract_revision"], 41)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v41")
         self.assertTrue(
             {
                 "New template",
