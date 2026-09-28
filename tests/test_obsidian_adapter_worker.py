@@ -25,6 +25,28 @@ def fixture_strings(bundle: str) -> dict:
 
 
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_composed_menu_title_requires_static_rows_and_title_sink(self) -> None:
+        rows = ('const choices=[{type:"Template",label:"Template",'
+                'description:"Create a note from a template file.",iconId:"file-text"},'
+                '{type:"Capture",label:"Capture",description:"Add text to a note.",'
+                'iconId:"pencil"}];')
+        menu = ('for(let choice of choices)menu.addItem(item=>item.setTitle('
+                '`${choice.label} \\u2014 ${choice.description}`).setIcon(choice.iconId));')
+        found = fixture_strings(rows + menu)
+        for source in ("Template — Create a note from a template file.",
+                       "Capture — Add text to a note."):
+            self.assertIn(source, found)
+            self.assert_runtime_evidence(found[source])
+            self.assertEqual(found[source]["evidence"][0]["symbol"], "composedMenuTitle")
+        for bundle in (rows, rows + menu.replace("setTitle", "log"),
+                       rows + 'const alias=choices;' + menu,
+                       rows + menu.replace("choice.description", "choice.type"),
+                       rows + ('for(let choice of choices){choice.label="Changed";'
+                               'menu.addItem(item=>item.setTitle('
+                               '`${choice.label} \\u2014 ${choice.description}`));}')):
+            self.assertNotIn("Template — Create a note from a template file.",
+                             fixture_strings(bundle))
+
     def test_review_indirect_dispatch_and_nested_template_regressions(self) -> None:
         for bundle in (
             'class P{forward(x){b.setTooltip(x)}show(){this["forward"]=log;this.forward("Private forwarded label")}}',
@@ -567,8 +589,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 39)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v39")
+        self.assertEqual(snapshot["contract_revision"], 40)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v40")
         self.assertTrue(
             {
                 "New template",

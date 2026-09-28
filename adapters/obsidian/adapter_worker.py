@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 39
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v39"
+CONTRACT_REVISION: Final = 40
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v40"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -947,6 +947,7 @@ def _collect_structured_matches(
     )
     _collect_forwarded_method_labels(tokens, matching, collected)
     _collect_map_key_option_labels(tokens, matching, collected)
+    _collect_composed_menu_titles(tokens, matching, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
     _collect_svelte_dom_attribute_labels(tokens, matching, collected)
@@ -1189,6 +1190,96 @@ def _collect_map_key_option_labels(
                 for key, token in keys:
                     if key != "__proto__":
                         _add_indirect_ui_text(collected, key, token, "mapKeyDropdownOption")
+
+
+def _collect_composed_menu_titles(
+    tokens: list[_Token], matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Fold static label/description pairs only at a direct menu title sink."""
+    for index in range(1, len(tokens) - 3):
+        name = tokens[index]
+        if (name.kind != "identifier" or tokens[index - 1].raw not in {"const", "let", "var"}
+                or tokens[index + 1].raw != "=" or tokens[index + 2].raw != "["):
+            continue
+        array_end = matching[index + 2]
+        if array_end < 0 or tokens[array_end + 1].raw not in {";", ","}:
+            continue
+        entries = _split_top_level_tokens(tokens[index + 3:array_end])
+        if not 2 <= len(entries) <= 20:
+            continue
+        labels: list[tuple[str, str, _Token]] = []
+        for entry in entries:
+            if not entry or entry[0].raw != "{" or entry[-1].raw != "}":
+                break
+            values: dict[str, str] = {}
+            for property_name in ("type", "label", "description", "iconId"):
+                matches = []
+                for field in _split_top_level_tokens(entry[1:-1]):
+                    colon = _top_level_token_index(field, ":")
+                    if colon > 0 and _static_catalog_key(field[:colon]) == property_name:
+                        matches.append(field[colon + 1:])
+                if len(matches) != 1 or len(matches[0]) != 1 or matches[0][0].kind != "literal":
+                    break
+                value = _decode_js_literal(matches[0][0].raw)
+                if not value:
+                    break
+                values[property_name] = value
+            if len(values) != 4:
+                break
+            labels.append((values["label"], values["description"], entry[0]))
+        if len(labels) != len(entries):
+            continue
+        uses = [i for i, token in enumerate(tokens) if token.kind == "identifier"
+                and token.raw == name.raw and not (i > 0 and tokens[i - 1].raw == ".")]
+        if len(uses) != 2 or uses[0] != index:
+            continue
+        use = uses[1]
+        if (use < 5 or tokens[use - 1].raw != "of" or tokens[use - 2].kind != "identifier"
+                or tokens[use - 3].raw not in {"let", "const"}
+                or tokens[use - 4].raw != "(" or tokens[use - 5].raw != "for"
+                or tokens[use + 1].raw != ")"):
+            continue
+        item = tokens[use - 2].raw
+        body_start = use + 2
+        body_end = (matching[body_start] if tokens[body_start].raw == "{"
+                    else body_start + len(_read_property_expression(tokens, body_start)))
+        if not body_start < body_end <= len(tokens) or body_end - body_start > 160:
+            continue
+        body_tokens = tokens[body_start:body_end]
+        if any(t.raw == item and (i + 2 >= len(body_tokens)
+               or body_tokens[i + 1].raw != "."
+               or body_tokens[i + 2].raw not in {"type", "label", "description", "iconId"}
+               or (i + 3 < len(body_tokens) and body_tokens[i + 3].raw
+                   in {"=", "+=", "-=", "++", "--"}))
+               for i, t in enumerate(body_tokens)):
+            continue
+        if sum(t.kind == "literal" and t.raw.startswith("`")
+               and "${" + item + "." in t.raw for t in body_tokens) != 1:
+            continue
+        separator = None
+        for cursor in range(body_start, body_end):
+            if (tokens[cursor].raw != "setTitle" or tokens[cursor - 1].raw != "."
+                    or tokens[cursor + 1].raw != "("):
+                continue
+            parsed = _read_call_arguments(tokens, cursor + 1, matching)
+            args = parsed[0] if parsed else []
+            raw = args[0][0].raw if args and len(args[0]) == 1 else ""
+            lead = "${" + item + ".label}"
+            tail = "${" + item + ".description}"
+            body = raw[1:-1] if raw.startswith("`") and raw.endswith("`") else ""
+            if not body.startswith(lead) or not body.endswith(tail):
+                continue
+            middle = body[len(lead):-len(tail)]
+            if "${" in middle:
+                continue
+            separator = _decode_js_literal("`" + middle + "`")
+            break
+        if not separator or not separator.strip():
+            continue
+        for label, description, token in labels:
+            _add_indirect_ui_text(collected, label + separator + description, token,
+                                  "composedMenuTitle")
 
 
 def _collect_indexed_error_messages(
