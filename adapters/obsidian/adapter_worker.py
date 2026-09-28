@@ -21,8 +21,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final, Literal, NamedTuple, TypedDict, cast
 
-CONTRACT_REVISION: Final = 38
-PARSER_ID: Final = "obsidian-plugin-ui-structured-v38"
+CONTRACT_REVISION: Final = 39
+PARSER_ID: Final = "obsidian-plugin-ui-structured-v39"
 PLUGIN_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 LOCALE_ROLE_PATTERN: Final = re.compile(
     r"^locale:([A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)(?::([a-f0-9]{12}))?$"
@@ -942,7 +942,11 @@ def _collect_structured_matches(
     group_descriptions = _collect_settings_group_descriptors(
         tokens, matching, collected, linked_description_helpers
     )
-    _collect_composed_settings_descriptions(tokens, matching, group_descriptions, collected)
+    _collect_composed_settings_descriptions(
+        tokens, matching, group_descriptions, linked_description_helpers, collected
+    )
+    _collect_forwarded_method_labels(tokens, matching, collected)
+    _collect_map_key_option_labels(tokens, matching, collected)
     _collect_svelte_form_descriptors(tokens, matching, collected)
     _collect_svelte_template_text(tokens, collected)
     _collect_svelte_dom_attribute_labels(tokens, matching, collected)
@@ -952,6 +956,239 @@ def _collect_structured_matches(
     _collect_indexed_error_messages(tokens, matching, collected)
     _collect_grouped_ui_text_dictionary(tokens, matching, collected)
     return True
+
+
+def _add_indirect_ui_text(
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+    text: str,
+    token: _Token,
+    symbol: str,
+) -> None:
+    # Shared values are runtime evidence, never file-patch literal slots.
+    _add_candidate(
+        collected, text, "ui-property",
+        {"origin": "ui-property", "strategy": "structured", "symbol": symbol,
+         "offset": token.start, "line": token.line, "column": token.column},
+        static_probe=text, ui_context_verified=True,
+    )
+
+
+def _brace_scope(tokens: list[_Token], matching: Sequence[int], index: int) -> tuple[int, int]:
+    """A conservative lexical boundary (object braces may narrow it further)."""
+    for start in range(index - 1, -1, -1):
+        if tokens[start].raw == "{" and matching[start] > index:
+            return start, matching[start]
+    return -1, len(tokens)
+
+
+def _template_mentions(token: _Token, name: str) -> bool:
+    return token.kind == "literal" and token.raw.startswith("`") and "${" in token.raw and bool(
+        re.search(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", token.raw)
+    )
+
+
+def _collect_forwarded_method_labels(
+    tokens: list[_Token], matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Only same-class, unique instance methods with unchanged sink arguments."""
+    for index, token in enumerate(tokens):
+        if token.raw != "class":
+            continue
+        opening = index + 1
+        while opening < len(tokens) and tokens[opening].raw not in {"{", ";", "("}:
+            opening += 1
+        if opening >= len(tokens) or tokens[opening].raw != "{":
+            continue
+        end = matching[opening]
+        methods: dict[str, list[tuple[list[list[_Token]], int, int]]] = {}
+        blocked_names: set[str] = set()
+        cursor = opening + 1
+        while cursor < end:
+            method = cursor
+            blocked = tokens[method].raw in {"static", "get", "set"}
+            if blocked:
+                method += 1
+            if tokens[method].raw == "async":
+                method += 1
+            if (method + 1 < end and tokens[method].kind == "identifier"
+                    and tokens[method + 1].raw == "("):
+                close = matching[method + 1]
+                body = close + 1
+                if body < end and tokens[body].raw == "{":
+                    finish = matching[body]
+                    params = _split_top_level_tokens(tokens[method + 2:close])
+                    if blocked:
+                        blocked_names.add(tokens[method].raw)
+                    else:
+                        methods.setdefault(tokens[method].raw, []).append((params, body, finish))
+                    cursor = finish + 1
+                    continue
+            if tokens[cursor].raw == ";":
+                cursor += 1
+                continue
+            if (method + 1 < end and tokens[method].kind == "identifier"
+                    and tokens[method + 1].raw in {"=", ";"}):
+                blocked_names.add(tokens[method].raw)
+                field = _read_property_expression(tokens, method)
+                cursor = method + len(field)
+                continue
+            # Unknown/computed members can replace any method name.
+            break
+        if cursor != end:
+            continue
+        for name, definitions in methods.items():
+            if len(definitions) != 1 or name == "constructor" or name in blocked_names:
+                continue
+            params, body, finish = definitions[0]
+            if any(len(part) != 1 or part[0].kind != "identifier" for part in params):
+                continue
+            if len({part[0].raw for part in params}) != len(params):
+                continue
+            # Reject replaced/escaped instance methods, including constructor fields.
+            references = [i for i in range(opening + 1, end - 2)
+                          if [t.raw for t in tokens[i:i + 3]] == ["this", ".", name]]
+            if any(tokens[i + 3].raw != "(" for i in references):
+                continue
+            if any(_template_mentions(t, name) for t in tokens[opening + 1:end]):
+                continue
+            if any(tokens[i].raw == "this" and tokens[i + 1].raw == "["
+                   and (tokens[i + 2].kind != "literal"
+                        or _decode_js_literal(tokens[i + 2].raw) == name)
+                   for i in range(opening + 1, end - 2)):
+                continue
+            for argument_index, parameter in enumerate(params):
+                parameter_name = parameter[0].raw
+                uses = {i for i in range(body + 1, finish) if tokens[i].raw == parameter_name}
+                sink_uses: set[int] = set()
+                for i in range(body + 1, finish - 1):
+                    sink = tokens[i].raw
+                    if (sink not in UI_CALL_NAMES and sink != "addOption") or tokens[i + 1].raw != "(":
+                        continue
+                    parsed = _read_call_arguments(tokens, i + 1, matching)
+                    label_index = 1 if sink == "addOption" else 0
+                    if (parsed and len(parsed[0]) > label_index
+                            and len(parsed[0][label_index]) == 1
+                            and tokens[parsed[1] + 1].raw != "{"):
+                        arg = parsed[0][label_index][0]
+                        if arg.raw == parameter_name:
+                            sink_uses.update(j for j in uses if tokens[j].start == arg.start)
+                if not uses or uses != sink_uses or any(
+                    t.raw in {"arguments", "eval", "with"} or _template_mentions(t, parameter_name)
+                    for t in tokens[body + 1:finish]
+                ):
+                    continue
+                for _, caller_body, caller_end in (d for ds in methods.values() for d in ds):
+                    # Nested dynamic-this functions/classes/object methods are not this class.
+                    nested: list[tuple[int, int]] = []
+                    for i in range(caller_body + 1, caller_end - 1):
+                        if tokens[i].raw == "(" and matching[i] + 1 < caller_end:
+                            close = matching[i]
+                            if (tokens[close + 1].raw == "{" and tokens[i - 1].raw
+                                    not in {"if", "for", "while", "switch", "catch", "with"}):
+                                nested.append((i, matching[close + 1]))
+                        if tokens[i].raw == "class":
+                            nested.append((i, caller_end))
+                    for ref in references:
+                        if not caller_body < ref < caller_end or any(a < ref < b for a, b in nested):
+                            continue
+                        parsed = _read_call_arguments(tokens, ref + 3, matching)
+                        if not parsed or argument_index >= len(parsed[0]):
+                            continue
+                        value = parsed[0][argument_index]
+                        if len(value) != 1 or value[0].kind != "literal":
+                            continue
+                        text = _decode_js_literal(value[0].raw)
+                        if text is not None:
+                            _add_indirect_ui_text(collected, text, value[0], "forwardedUiParameter")
+
+
+def _collect_map_key_option_labels(
+    tokens: list[_Token], matching: Sequence[int],
+    collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
+) -> None:
+    """Static Map keys require an unescaped map and direct option-label use."""
+    for index in range(1, len(tokens) - 12):
+        if (tokens[index].kind != "identifier" or tokens[index - 1].raw not in {"var", "let", "const"}
+                or [t.raw for t in tokens[index + 1:index + 10]]
+                != ["=", "new", "Map", "(", "Object", ".", "entries", "(", "{"]):
+            continue
+        object_end = matching[index + 9]
+        if [t.raw for t in tokens[object_end + 1:object_end + 3]] != [")", ")"]:
+            continue
+        if object_end + 3 >= len(tokens) or tokens[object_end + 3].raw not in {",", ";", "}"}:
+            continue
+        entries = _split_top_level_tokens(tokens[index + 10:object_end])
+        keys: list[tuple[str, _Token]] = []
+        for entry in entries:
+            colon = _top_level_token_index(entry, ":")
+            key = _static_catalog_key(entry[:colon]) if colon == 1 else None
+            if key is None or len(entry[colon + 1:]) != 1:
+                break
+            keys.append((key, entry[0]))
+        else:
+            if not keys:
+                continue
+            name = tokens[index].raw
+            scope_start, scope_end = _brace_scope(tokens, matching, index)
+            proven = False
+            safe = True
+            for ref, token in enumerate(tokens):
+                if _template_mentions(token, name):
+                    safe = False
+                    break
+                if token.raw != name or ref == index:
+                    continue
+                if not scope_start < ref < scope_end or ref < object_end:
+                    safe = False
+                    break
+                member = [t.raw for t in tokens[ref + 1:ref + 4]]
+                if member in ([".", "get", "("], [".", "has", "("]):
+                    continue
+                if (member != [".", "keys", "("] or ref + 6 >= len(tokens)
+                        or tokens[ref + 4].raw != ")"):
+                    safe = False
+                    break
+                # for (let key of map.keys()) ... ; (with or without braces)
+                head = tokens[ref - 5:ref]
+                if (len(head) != 5 or [t.raw for t in head[:2]] != ["for", "("]
+                        or head[2].raw not in {"let", "const"} or head[3].kind != "identifier"
+                        or head[4].raw != "of" or tokens[ref + 5].raw != ")"):
+                    safe = False
+                    break
+                key_name = head[3].raw
+                start = ref + 6
+                if tokens[start].raw == "{":
+                    stop = matching[start]
+                    start += 1
+                else:
+                    statement = _read_property_expression(tokens, start)
+                    stop = start + len(statement)
+                uses = {i for i in range(start, stop) if tokens[i].raw == key_name}
+                allowed: set[int] = set()
+                label_used = False
+                for i in range(start, stop - 1):
+                    if tokens[i].raw != "addOption" or tokens[i + 1].raw != "(":
+                        continue
+                    parsed = _read_call_arguments(tokens, i + 1, matching)
+                    args = parsed[0] if parsed else []
+                    if parsed and parsed[1] + 1 < len(tokens) and tokens[parsed[1] + 1].raw == "{":
+                        continue
+                    if len(args) < 2 or len(args[1]) != 1 or args[1][0].raw != key_name:
+                        continue
+                    label_used = True
+                    for arg in args[:2]:
+                        if len(arg) == 1 and arg[0].raw == key_name:
+                            allowed.update(j for j in uses if tokens[j].start == arg[0].start)
+                if (label_used and uses == allowed and not any(
+                    _template_mentions(t, key_name) or t.raw in {"eval", "with"}
+                    for t in tokens[start:stop]
+                )):
+                    proven = True
+            if safe and proven:
+                for key, token in keys:
+                    if key != "__proto__":
+                        _add_indirect_ui_text(collected, key, token, "mapKeyDropdownOption")
 
 
 def _collect_indexed_error_messages(
@@ -1439,11 +1676,11 @@ def _collect_settings_group_descriptors(
     matching: Sequence[int],
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
     linked_description_helpers: set[str],
-) -> set[str]:
+) -> dict[str, list[_Token]]:
     """Extract declarative settings-group descriptors such as QuickAdd's
     ``{ type: "group", heading: "Choice picker", items: [...] }``."""
 
-    description_names: set[str] = set()
+    description_names: dict[str, list[_Token]] = {}
     for index, token in enumerate(tokens):
         if token.raw != "{":
             continue
@@ -1469,7 +1706,7 @@ def _collect_settings_group_descriptors(
                 and len(description_reference) == 1
                 and description_reference[0].kind == "identifier"
             ):
-                description_names.add(description_reference[0].raw)
+                description_names.setdefault(description_reference[0].raw, []).append(description_reference[0])
             for property_name in ("name", "desc", "description"):
                 expression = _static_object_string_property(item, property_name)
                 if expression is not None:
@@ -1672,6 +1909,20 @@ def _find_linked_description_helpers(
             for part in _split_top_level_tokens(tokens[index + 3 : close])
         ]
         declarations[name] = (params, open_index + 1, end)
+
+    def unambiguous_helper(name: str) -> bool:
+        uses = [i for i, t in enumerate(tokens) if t.kind == "identifier" and t.raw == name
+                and not (i > 0 and tokens[i - 1].raw == ".")
+                and not (i > 0 and i + 1 < len(tokens)
+                         and tokens[i - 1].raw in {"{", ","} and tokens[i + 1].raw == ":")]
+        definitions = [i for i in uses if i > 0 and tokens[i - 1].raw == "function"]
+        if len(definitions) != 1 or any(_template_mentions(t, name) for t in tokens):
+            return False
+        definition = definitions[0]
+        scope_start, scope_end = _brace_scope(tokens, matching, definition)
+        return all(i == definition or (scope_start < i < scope_end and i + 1 < len(tokens)
+                                      and tokens[i + 1].raw == "(") for i in uses)
+
     link_helpers: set[str] = set()
     for name, (params, start, end) in declarations.items():
         if name in duplicates or len(params) < 3:
@@ -1682,6 +1933,7 @@ def _find_linked_description_helpers(
             _has_token_sequence(body, ("textContent", "=", label))
             and _has_token_sequence(body, ("href", "=", url))
             and _has_token_sequence(body, (parent, ".", "append", "("))
+            and unambiguous_helper(name)
         ):
             link_helpers.add(name)
     wrappers: set[str] = set()
@@ -1696,6 +1948,13 @@ def _find_linked_description_helpers(
             and _has_token_sequence(body, ("return",))
         ):
             continue
+        lead_uses = [i for i, t in enumerate(body) if t.kind == "identifier" and t.raw == lead
+                     and not (i > 0 and body[i - 1].raw == ".")]
+        if any(_template_mentions(t, lead) for t in body) or any(
+            i < 4 or [t.raw for t in body[i - 4:i]] != ["document", ".", "createTextNode", "("]
+            or i + 1 >= len(body) or body[i + 1].raw != ")" for i in lead_uses
+        ):
+            continue
         for index in range(start, end - 1):
             if tokens[index].raw not in link_helpers or tokens[index + 1].raw != "(":
                 continue
@@ -1707,6 +1966,7 @@ def _find_linked_description_helpers(
                 and args[1][0].raw == url
                 and len(args[2]) == 1
                 and args[2][0].raw == label
+                and unambiguous_helper(name)
             ):
                 wrappers.add(name)
     return wrappers
@@ -1741,34 +2001,73 @@ def _linked_description_literals(
 def _collect_composed_settings_descriptions(
     tokens: list[_Token],
     matching: Sequence[int],
-    description_names: set[str],
+    description_references: dict[str, list[_Token]],
+    linked_description_helpers: set[str],
     collected: dict[str, tuple[set[StringOrigin], dict[str, StringEvidence]]],
 ) -> None:
-    """Fold only immutable settings copy in linked documentation branches."""
+    """Resolve one immutable binding at a descriptor/sink, then complete branches.
 
-    if not description_names:
+    All identifier occurrences must be the declaration or proven description
+    consumers. This deliberately rejects ambiguous scopes, shadowing and writes,
+    rather than treating arbitrary string variables as UI copy.
+    """
+    references = {name: list(refs) for name, refs in description_references.items()}
+    ui_properties = _ui_registration_context_property_indices(tokens)
+    for index in range(len(tokens) - 2):
+        token = tokens[index]
+        expression: list[_Token] = []
+        if token.raw == "setDesc" and tokens[index + 1].raw == "(":
+            call = _read_call_arguments(tokens, index + 1, matching)
+            if (call and call[0] and (call[1] + 1 == len(tokens)
+                    or tokens[call[1] + 1].raw != "{")):
+                expression = call[0][0]
+        elif index in ui_properties and token.raw in {"desc", "description"}:
+            expression = _read_property_expression(tokens, index + 2)
+        if len(expression) == 1 and expression[0].kind == "identifier":
+            references.setdefault(expression[0].raw, []).append(expression[0])
+    constants: dict[str, tuple[str, int, int]] = {}
+    for name, consumers in references.items():
+        uses = [i for i, t in enumerate(tokens) if t.raw == name
+                and not (i > 0 and tokens[i - 1].raw == ".")
+                and not (i > 0 and i + 1 < len(tokens)
+                         and tokens[i - 1].raw in {"{", ","} and tokens[i + 1].raw == ":")]
+        declarations = [i for i in uses if i > 0 and i + 3 < len(tokens)
+                        and tokens[i - 1].raw in {"var", "let", "const"}
+                        and tokens[i + 1].raw == "=" and tokens[i + 2].kind == "literal"
+                        and tokens[i + 3].raw in {";", ",", "}"}]
+        if len(declarations) != 1:
+            continue
+        declaration = declarations[0]
+        allowed = {t.start for t in consumers} | {tokens[declaration].start}
+        if any(tokens[i].start not in allowed for i in uses):
+            continue
+        value = _decode_js_literal(tokens[declaration + 2].raw)
+        if value is None:
+            continue
+        start, end = _brace_scope(tokens, matching, declaration)
+        if any(not declaration < i < end for i in uses if i != declaration):
+            continue
+        # Interpolations are opaque tokenizer literals; do not miss hidden writes.
+        marker = "${" + name + "}"
+        if any(_template_mentions(t, name) and _template_mentions(
+            t._replace(raw=t.raw.replace(marker, "")), name
+        ) for t in tokens):
+            continue
+        constants[name] = (value, start, end)
+        for consumer in consumers:
+            _add_indirect_ui_text(collected, value, consumer, "settingsDescriptionReference")
+    if not constants:
         return
-    assignments: dict[str, int] = {}
-    constants: dict[str, str] = {}
-    for index in range(1, len(tokens) - 2):
-        name = tokens[index]
-        if (
-            name.kind != "identifier"
-            or name.raw not in description_names
-            or tokens[index + 1].raw != "="
-        ):
-            continue
-        assignments[name.raw] = assignments.get(name.raw, 0) + 1
-        if tokens[index - 1].raw not in {"var", "let", "const"}:
-            continue
-        if tokens[index + 2].kind != "literal":
-            continue
-        value = _decode_js_literal(tokens[index + 2].raw)
-        if value is not None:
-            constants[name.raw] = value
+    # Reject shadowed/escaped helper names as well as member calls that merely
+    # happen to have the same spelling as a recognized function.
+    helpers = {name for name in linked_description_helpers if all(
+        i + 1 < len(tokens) and tokens[i + 1].raw == "("
+        and (i == 0 or tokens[i - 1].raw != ".")
+        for i, t in enumerate(tokens) if t.raw == name
+    )}
     for index in range(len(tokens) - 1):
         call = tokens[index]
-        if call.raw != "descWithDocsLink" or tokens[index + 1].raw != "(":
+        if call.raw not in helpers or tokens[index + 1].raw != "(":
             continue
         parsed = _read_call_arguments(tokens, index + 1, matching)
         if parsed is None or not parsed[0]:
@@ -1776,9 +2075,8 @@ def _collect_composed_settings_descriptions(
         expression = parsed[0][0]
         question = _top_level_token_index(expression, "?")
         colon_offset = (
-            _top_level_token_index(expression[question + 1 :], ":")
-            if question >= 0
-            else -1
+            _top_level_token_index(expression[question + 1:], ":")
+            if question >= 0 else -1
         )
         colon = question + 1 + colon_offset if colon_offset >= 0 else -1
         if question < 0 or colon != question + 2 or len(expression) != colon + 2:
@@ -1787,32 +2085,19 @@ def _collect_composed_settings_descriptions(
             if variant.kind != "literal" or not variant.raw.startswith("`"):
                 continue
             body = variant.raw[1:-1]
-            for name, value in constants.items():
-                if assignments.get(name) != 1:
+            for name, (value, start, end) in constants.items():
+                if not start < index < end:
                     continue
                 marker = "${" + name + "}"
                 at = body.find(marker)
-                if at < 0 or body.find("${") != at or "${" in body[at + len(marker) :]:
+                if at < 0 or body.find("${") != at or "${" in body[at + len(marker):]:
                     continue
                 prefix = _decode_js_literal("`" + body[:at] + "`")
-                suffix = _decode_js_literal("`" + body[at + len(marker) :] + "`")
+                suffix = _decode_js_literal("`" + body[at + len(marker):] + "`")
                 if prefix is None or suffix is None:
                     continue
-                text = prefix + value + suffix
-                _add_candidate(
-                    collected,
-                    text,
-                    "ui-property",
-                    {
-                        "origin": "ui-property",
-                        "strategy": "structured",
-                        "symbol": "settingsComposedDocumentation",
-                        "offset": variant.start,
-                        "line": variant.line,
-                        "column": variant.column,
-                    },
-                    static_probe=text,
-                    ui_context_verified=True,
+                _add_indirect_ui_text(
+                    collected, prefix + value + suffix, variant, "settingsComposedDocumentation"
                 )
 
 

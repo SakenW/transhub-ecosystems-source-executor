@@ -8,7 +8,200 @@ import zlib
 from adapters.obsidian.adapter_worker import _decode_js_literal, build_snapshot
 
 
+LINKED_DESCRIPTION_HELPERS = (
+    'function attachLink(parent,url,label){let a=parent.createEl("a");'
+    'a.textContent=label;a.href=url;parent.append(a);return a}'
+    'function renamedDocs(lead,url,label="Learn more"){let fragment=createFragment();'
+    'return fragment.append(document.createTextNode(lead)),attachLink(fragment,url,label),fragment}'
+)
+
+
+def fixture_strings(bundle: str) -> dict:
+    snapshot = json.loads(build_snapshot(
+        b'{"id":"unrelated-plugin","name":"Fixture","version":"1.0.0","description":"Fixture metadata."}',
+        bundle.encode(),
+    ))
+    return {row["source"]: row for row in snapshot["strings"]}
+
+
 class ObsidianAdapterWorkerTests(unittest.TestCase):
+    def test_review_indirect_dispatch_and_nested_template_regressions(self) -> None:
+        for bundle in (
+            'class P{forward(x){b.setTooltip(x)}show(){this["forward"]=log;this.forward("Private forwarded label")}}',
+            'class P{forward(x){b.setTooltip(x)}show(){`${this.forward=log}`;this.forward("Private forwarded label")}}',
+            'const key="forward";class P{forward(x){b.setTooltip(x)}[key](x){log(x)}show(){this.forward("Private forwarded label")}}',
+            'class P{static async forward(x){b.setTooltip(x)}show(){this.forward("Private forwarded label")}}',
+            'class P{forward(x){eval("x=other");b.setTooltip(x)}show(){this.forward("Private forwarded label")}}',
+        ):
+            with self.subTest(bundle=bundle):
+                self.assertNotIn("Private forwarded label", fixture_strings(bundle))
+        for extra in (
+            '`${(()=>{work()})(),commands.clear()}`;for(let k of commands.keys())d.addOption(k,k);',
+            'for(let k of commands.keys()){`${(()=>{work()})(),k=other}`;d.addOption(k,k)}',
+        ):
+            self.assertNotIn("Private map label", fixture_strings(
+                'const commands=new Map(Object.entries({"Private map label":Handler}));' + extra))
+        self.assertNotIn("Hidden base.", fixture_strings(
+            'let intro="Hidden base.";`${(()=>{work()})(),intro=other}`;setting.setDesc(intro);'))
+
+    def test_review_changed_helper_and_prototype_key(self) -> None:
+        for helper in (
+            LINKED_DESCRIPTION_HELPERS.replace('let fragment=createFragment()', 'lead=other;let fragment=createFragment()'),
+            'function hidden(){' + LINKED_DESCRIPTION_HELPERS + '}',
+            LINKED_DESCRIPTION_HELPERS + '`${renamedDocs=other}`;',
+        ):
+            rows = fixture_strings(helper + 'const intro="Visible base.";setting.setDesc(intro);'
+                'function describe(flag){return renamedDocs(flag?`${intro} Hidden branch.`:`${intro} Other branch.`,docs,"Read docs")}')
+            self.assertNotIn("Visible base. Hidden branch.", rows)
+        rows = fixture_strings('const commands=new Map(Object.entries({__proto__:Handler,"Visible label":Handler}));for(let k of commands.keys())d.addOption(k,k);')
+        self.assertNotIn("__proto__", rows)
+        self.assertIn("Visible label", rows)
+
+    def assert_runtime_evidence(self, row: dict) -> None:
+        self.assertTrue(row["evidence"])
+        for evidence in row["evidence"]:
+            for field in ("literalStart", "literalEnd", "literal_start", "literal_end"):
+                self.assertNotIn(field, evidence)
+
+    def test_unique_class_method_forwards_only_ui_parameter(self) -> None:
+        rows = fixture_strings(
+            'class Panel {'
+            'show(){this.renamedButton(parent,"branch-icon","Add conditional command","Internal callback");}'
+            'renamedButton(parent,icon,caption,callback){'
+            'new Button(parent).setIcon(icon).setTooltip(caption).onClick(()=>callback());}}'
+            'class Unrelated {show(){this.renamedButton(parent,"other-icon","Unrelated payload",fn);}'
+            'renamedButton(parent,icon,caption,callback){console.log(caption)}}'
+        )
+        self.assertIn("Add conditional command", rows)
+        self.assertFalse({"branch-icon", "Internal callback", "other-icon", "Unrelated payload"} & rows.keys())
+        self.assert_runtime_evidence(rows["Add conditional command"])
+        options = fixture_strings('class Panel {'
+            'show(){this.option("Internal option value","Visible option label");}'
+            'option(value,label){dropdown.addOption(value,label)}}')
+        self.assertIn("Visible option label", options)
+        self.assertNotIn("Internal option value", options)
+        self.assert_runtime_evidence(options["Visible option label"])
+
+    def test_forwarded_parameters_reject_mutation_shadowing_and_non_ui(self) -> None:
+        for body in (
+            'label="Changed";button.setTooltip(label)',
+            'label+=" suffix";button.setTooltip(label)',
+            '{let label=other;button.setTooltip(label)}',
+            'function nested(label){button.setTooltip(label)}',
+            'function setTooltip(label){console.log(other)}',
+            '((label)=>button.setTooltip(label))(other)',
+            'console.log(label)',
+            'button.setIcon(label)',
+            'arguments[0]=other;button.setTooltip(label)',
+            '`${label=other}`;button.setTooltip(label)',
+        ):
+            with self.subTest(body=body):
+                rows = fixture_strings('class Panel {show(){this.forward("Hidden forwarded value");}'
+                                       'forward(label){' + body + '}}')
+                self.assertNotIn("Hidden forwarded value", rows)
+        for declarations, caller in (
+            ('forward(label){button.setTooltip(label)} forward(label){log(label)}', 'this.forward("Hidden forwarded value")'),
+            ('static forward(label){button.setTooltip(label)}', 'this.forward("Hidden forwarded value")'),
+            ('forward(label){button.setTooltip(label)} forward=other;', 'this.forward("Hidden forwarded value")'),
+            ('get forward(){return other} forward(label){button.setTooltip(label)}', 'this.forward("Hidden forwarded value")'),
+            ('forward(label){button.setTooltip(label)}', 'this.forward=other;this.forward("Hidden forwarded value")'),
+            ('forward(label){button.setTooltip(label)}', 'function nested(){this.forward("Hidden forwarded value")}'),
+            ('forward(label){button.setTooltip(label)}', 'const obj={nested(){this.forward("Hidden forwarded value")}}'),
+        ):
+            with self.subTest(declarations=declarations, caller=caller):
+                self.assertNotIn("Hidden forwarded value", fixture_strings(
+                    'class Panel {' + declarations + ' show(){' + caller + '}}'))
+
+    def test_description_bindings_and_renamed_helper_branches_are_runtime_only(self) -> None:
+        for consumer in (
+            'const group={type:"group",heading:"Settings",items:[{name:"Packages",desc:intro,render:view}]};',
+            'setting.setDesc(intro);',
+            'register({name:"Packages",description:intro,callback:view});',
+        ):
+            with self.subTest(consumer=consumer):
+                rows = fixture_strings(LINKED_DESCRIPTION_HELPERS +
+                    'const intro="Reusable automation packages.";' + consumer +
+                    'function describe(empty){return renamedDocs(empty?`${intro} Export after adding a choice. `:`${intro} `,docs,"Documentation")}')
+                for text in ("Reusable automation packages.",
+                             "Reusable automation packages. Export after adding a choice."):
+                    self.assertIn(text, rows)
+                    self.assert_runtime_evidence(rows[text])
+
+    def test_description_bindings_reject_writes_shadowing_and_non_ui_consumers(self) -> None:
+        for declaration, consumer, extra in (
+            ('const intro="Hidden base.";', 'console.log(intro);', ''),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'intro=other;'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'intro+=" appended";'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'intro ||= other;'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'function inner(intro){setting.setDesc(intro)}'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'function setDesc(intro){console.log(other)}'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', 'const inner=(intro)=>intro;'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', '{const intro=other;}'),
+            ('let intro="Hidden base.";', 'setting.setDesc(intro);', '`${intro=other}`;'),
+            ('const intro=dynamic();', 'setting.setDesc(intro);', ''),
+            ('const intro="Hidden base."+dynamic;', 'setting.setDesc(intro);', ''),
+            ('function hidden(){const intro="Hidden base.";}', 'setting.setDesc(intro);', ''),
+        ):
+            with self.subTest(declaration=declaration, consumer=consumer, extra=extra):
+                rows = fixture_strings(LINKED_DESCRIPTION_HELPERS + declaration + consumer + extra +
+                    'function describe(flag){return renamedDocs(flag?`${intro} Enabled.`:`${intro} Disabled.`,docs,"Read docs")}')
+                self.assertNotIn("Hidden base.", rows)
+                self.assertNotIn("Hidden base. Enabled.", rows)
+                self.assertNotIn("Hidden base. Disabled.", rows)
+        for helper in ('renamedDocs', 'descWithDocsLink'):
+            rows = fixture_strings('function ' + helper + '(lead,url,label){console.log(lead,url,label)}'
+                'const intro="Visible base.";setting.setDesc(intro);'
+                'function describe(flag){return ' + helper + '(flag?`${intro} Hidden branch.`:`${intro} Other branch.`,docs,"Read docs")}')
+            self.assertIn("Visible base.", rows)
+            self.assertNotIn("Visible base. Hidden branch.", rows)
+
+    def test_static_map_keys_require_direct_option_labels_and_keep_dispatch_unchanged(self) -> None:
+        for loop in ('for(let key of commands.keys()) dropdown.addOption(key,key);',
+                     'for(const key of commands.keys()){dropdown.addOption(key,key)}'):
+            with self.subTest(loop=loop):
+                bundle = ('const commands=new Map(Object.entries({Copy:CopyCommand,"Paste with format":PasteCommand}));'
+                          'function render(){' + loop + '}'
+                          'function dispatch(key){return commands.get(key)}'
+                          'class CopyCommand extends Base{constructor(){super("Internal constructor token")}}')
+                rows = fixture_strings(bundle)
+                for label in ("Copy", "Paste with format"):
+                    self.assertIn(label, rows)
+                    self.assert_runtime_evidence(rows[label])
+                self.assertNotIn("Internal constructor token", rows)
+
+    def test_indirect_rules_ignore_incomplete_or_unconsumed_map_shapes(self) -> None:
+        for bundle in (
+            'const commands=new Map(Object.entries({"Hidden map label":Command}))',
+            'const commands=new Map(Object.entries({"Hidden map label":Command}));commands.keys()',
+            'const commands=new Map(Object.entries({"Hidden map label":Command}));for(let key of commands.keys())',
+        ):
+            with self.subTest(bundle=bundle):
+                self.assertNotIn("Hidden map label", fixture_strings(bundle))
+
+    def test_map_keys_reject_mutation_escape_shadowing_and_value_only_use(self) -> None:
+        loop = 'for(let key of commands.keys())dropdown.addOption(key,key);'
+        for use in (
+            '', 'commands.get("Hidden map label");',
+            'for(let key of commands.keys())dropdown.addOption(key,"Visible label");',
+            'for(let key of commands.keys())console.log(key);',
+            'commands.set("Other",other);' + loop,
+            'commands.delete("Other");' + loop,
+            'commands.clear();' + loop,
+            'commands=other;' + loop,
+            'const escaped=commands;' + loop,
+            'mutate(commands);' + loop,
+            'commands.get=other;' + loop,
+            'const get=commands.get;' + loop,
+            'function render(commands){' + loop + '}',
+            'function render(){const commands=other;' + loop + '}',
+            'for(let key of commands.keys()){key=other;dropdown.addOption(key,key)}',
+            'for(let key of commands.keys()){((key)=>dropdown.addOption(key,key))(other)}',
+            '`${commands.clear()}`;' + loop,
+        ):
+            with self.subTest(use=use):
+                rows = fixture_strings('const commands=new Map(Object.entries({"Hidden map label":Command}));' + use)
+                self.assertNotIn("Hidden map label", rows)
+
     def test_static_visible_dom_attributes_do_not_harvest_data_keys(self) -> None:
         bundle = "\n".join(
             [
@@ -374,8 +567,8 @@ return promise;}
             )
         )
         strings = {row["source"]: row for row in snapshot["strings"]}
-        self.assertEqual(snapshot["contract_revision"], 38)
-        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v38")
+        self.assertEqual(snapshot["contract_revision"], 39)
+        self.assertEqual(snapshot["parser"], "obsidian-plugin-ui-structured-v39")
         self.assertTrue(
             {
                 "New template",
@@ -512,14 +705,15 @@ return promise;}
     def test_immutable_linked_settings_description_has_complete_variants(self) -> None:
         bundle = "\n".join(
             [
+                LINKED_DESCRIPTION_HELPERS,
                 'var packageIntro="Bundle or import QuickAdd automations as reusable packages.";',
                 'const group={type:"group",heading:"Choices & packages",items:[{name:"Packages",desc:packageIntro,render:x=>x}]};',
-                'function packageDesc(empty){return this.descWithDocsLink(empty?`${packageIntro} Export becomes available once you have a choice. `:`${packageIntro} `,docs,"Learn more about packages")}',
+                'function packageDesc(empty){return renamedDocs(empty?`${packageIntro} Export becomes available once you have a choice. `:`${packageIntro} `,docs,"Learn more about packages")}',
                 'var internal="Internal connection setting";',
-                'function notVisible(empty){return this.descWithDocsLink(empty?`${internal} enabled`:`${internal} disabled`,docs)}',
+                'function notVisible(empty){return renamedDocs(empty?`${internal} enabled`:`${internal} disabled`,docs)}',
                 'var mutable="Mutable description";mutable="Changed description";',
                 'const other={type:"group",heading:"Other",items:[{name:"Mutable",desc:mutable,render:x=>x}]};',
-                'function changed(empty){return this.descWithDocsLink(empty?`${mutable} first`:`${mutable} second`,docs)}',
+                'function changed(empty){return renamedDocs(empty?`${mutable} first`:`${mutable} second`,docs)}',
             ]
         )
         snapshot = json.loads(
