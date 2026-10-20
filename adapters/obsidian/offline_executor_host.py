@@ -223,7 +223,7 @@ def docker_run_command(
         "--mount",
         (
             f"type=bind,source={staged_executor},"
-            f"target={_CONTAINER_EXECUTOR_PATH},readonly,bind-nonrecursive"
+            f"target={_CONTAINER_EXECUTOR_PATH},readonly,bind-recursive=disabled"
         ),
         "--entrypoint",
         "python3",

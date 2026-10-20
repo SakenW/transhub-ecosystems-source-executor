@@ -167,6 +167,8 @@ class PublicBoundaryTests(unittest.TestCase):
             _task_value: OfflineExecutorTask,
         ) -> None:
             mount = command[command.index("--mount") + 1]
+            self.assertIn(",readonly,bind-recursive=disabled", mount)
+            self.assertNotIn("bind-nonrecursive", mount)
             source = Path(mount.split("source=", 1)[1].split(",", 1)[0])
             observed_roots.append(source.parent)
             observed_names.append(command[command.index("--name") + 1])
