@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+import json
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +18,12 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         lowered = workflow.lower()
 
+        self.assertEqual(
+            re.findall(r"(?m)^\s*runs-on:\s*(.+)$", workflow),
+            ["[self-hosted, Linux, X64, docker, transhub-source-executor]"],
+        )
+        for hosted in ("ubuntu-latest", "windows-latest", "macos-latest"):
+            self.assertNotIn(hosted, workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("schedule:", workflow)
         self.assertIn('cron: "7-59/5 * * * *"', workflow)
@@ -56,7 +66,9 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertRegex(workflow, r"actions/attest@[0-9a-f]{40}")
-        self.assertIn("subject-path: ${{ runner.temp }}/public-discovery-executor.pyz", workflow)
+        self.assertIn(
+            "subject-path: ${{ runner.temp }}/public-discovery-executor.pyz", workflow
+        )
         self.assertIn("inputs.attest_only == true", workflow)
         self.assertIn("inputs.attest_only != true", workflow)
         self.assertNotRegex(workflow, r"(?m)^\s*[^#\n]*\+\s{2,}")
@@ -67,6 +79,37 @@ class WorkflowContractTests(unittest.TestCase):
             "secrets.",
         ):
             self.assertNotIn(forbidden_channel, lowered)
+
+    def test_job_docker_config_is_empty_private_and_inside_runner_temp(self) -> None:
+        workflow = (
+            ROOT / ".github/workflows/public-discovery-executor.yml"
+        ).read_text()
+        step = workflow.split("- name: Prepare job-scoped Docker config", 1)[1].split(
+            "- name:", 1
+        )[0]
+        shell = step.split("        run: |\n", 1)[1]
+        shell = "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in shell.splitlines()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_file = root / "github-env"
+            environment_file.touch()
+            env = {
+                **os.environ,
+                "RUNNER_TEMP": str(root),
+                "GITHUB_ENV": str(environment_file),
+                "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2",
+            }
+            subprocess.run(["bash", "-euc", shell], env=env, check=True)
+            config = root / "public-source-docker-123-2/config.json"
+            self.assertEqual(json.loads(config.read_text()), {})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                environment_file.read_text(), f"DOCKER_CONFIG={config.parent}\n"
+            )
 
 
 if __name__ == "__main__":

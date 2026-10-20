@@ -13,10 +13,14 @@ plugin JavaScript, or publish raw plugin files.
 
 ## Security boundary
 
-The GitHub-hosted workflow fails closed unless it runs from
+The dedicated self-hosted Linux workflow fails closed unless it runs from
 the repository's protected default branch. It has only read-only repository
 access and OIDC token issuance. Checkout does not persist credentials. The
-workflow accepts only two repository variables:
+workflow uses only the `self-hosted,Linux,X64,docker,transhub-source-executor` runner role,
+with no hosted fallback. It uses a private empty job-scoped Docker config under
+`RUNNER_TEMP`, so an interactive Docker credential helper is never a dependency.
+The dedicated repository Runner must be registered and preflighted before enabling
+this workflow; a production-deployment Runner is not a substitute. The workflow accepts only two repository variables:
 
 - `TRANSHUB_PUBLIC_DISCOVERY_API_BASE`: the HTTPS control-plane base.
 - `TRANSHUB_PUBLIC_DISCOVERY_OIDC_AUDIENCE`: the dedicated OIDC audience.

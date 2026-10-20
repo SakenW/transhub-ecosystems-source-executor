@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   guard-and-execute:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, docker, transhub-source-executor]
     timeout-minutes: 10
     steps:
       - name: Refuse non-default or unprotected refs
@@ -43,6 +43,19 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+
+      - name: Prepare job-scoped Docker config
+        if: >-
+          github.ref_protected == true &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          source_docker_config="${RUNNER_TEMP:?}/public-source-docker-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          install -d -m 0700 -- "$source_docker_config"
+          printf '%s\n' '{}' > "$source_docker_config/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "$source_docker_config" >> "$GITHUB_ENV"
 
       - name: Materialize the fixed offline parser image before claiming work
         if: >-
