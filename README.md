@@ -106,6 +106,10 @@ require Docker.
 
 ## Failure, concurrency, rollback, and compatibility
 
+- A nonzero offline-parser exit preserves only a bounded protocol error code,
+  or the numeric exit/signal when no valid error envelope exists. Raw stderr,
+  component bytes, and malformed output never enter workflow diagnostics.
+  Exit 137 alone is not proof of an out-of-memory kill.
 - Any registry/repository/release/profile identity, digest, size,
   missing/duplicate component, manifest, catalog, lease binding, upload
   confirmation, or protected-ref mismatch fails closed with a bounded code. A

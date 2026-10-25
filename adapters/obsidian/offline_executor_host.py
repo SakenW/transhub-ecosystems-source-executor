@@ -341,7 +341,29 @@ def _run_docker(
             child.wait()
             raise OfflineExecutorHostError("offline_executor_timeout") from exc
         if return_code != 0:
-            raise OfflineExecutorHostError("offline_executor_adapter_failed")
+            output.seek(0)
+            failure = output.read(1025)
+            if len(failure) <= 1024:
+                try:
+                    envelope = _parse_unique_json(failure)
+                except ValueError:
+                    envelope = None
+                if (
+                    isinstance(envelope, dict)
+                    and set(envelope) == {"error", "protocol"}
+                    and envelope["protocol"] == PUBLIC_EXECUTOR_PROTOCOL
+                    and isinstance(envelope["error"], dict)
+                    and set(envelope["error"]) == {"code"}
+                    and isinstance(envelope["error"]["code"], str)
+                    and re.fullmatch(r"[a-z0-9_]{1,94}", envelope["error"]["code"])
+                ):
+                    raise OfflineExecutorHostError(
+                        "offline_executor_adapter_rejected_" + envelope["error"]["code"]
+                    )
+            exit_kind = "signal" if return_code < 0 else "exit"
+            raise OfflineExecutorHostError(
+                f"offline_executor_adapter_failed_{exit_kind}_{abs(return_code)}"
+            )
     except FileNotFoundError as exc:
         raise OfflineExecutorHostError("offline_executor_docker_unavailable") from exc
     finally:
